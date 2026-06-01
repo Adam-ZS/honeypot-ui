@@ -78,7 +78,7 @@ class EmailService:
             logger.info(f"SMTP email sent to {to_email}")
             return True
         except Exception as e:
-            logger.error(f"SMTP send failed: {e}")
+            print(f">>> SMTP FAILED: {type(e).__name__}: {e}", flush=True)
             return False
 
     def _send(self, to_email: str, subject: str, html: str, text: str) -> bool:
