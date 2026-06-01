@@ -47,10 +47,10 @@ class EmailService:
                 return resp.status in (200, 201)
         except urllib.error.HTTPError as e:
             body = e.read().decode()
-            logger.error(f"Resend API error {e.code}: {body}")
+            print(f">>> RESEND HTTP ERROR {e.code}: {body}", flush=True)
             return False
         except Exception as e:
-            logger.error(f"Resend request failed: {e}")
+            print(f">>> RESEND FAILED: {type(e).__name__}: {e}", flush=True)
             return False
 
     def _send_via_smtp(self, to_email: str, subject: str, html: str, text: str) -> bool:
