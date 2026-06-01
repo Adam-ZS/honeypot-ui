@@ -61,6 +61,43 @@ class EmailService:
             print(f">>> SENDGRID FAILED: {type(e).__name__}: {e}", flush=True)
             return False
 
+
+    def _send_via_brevo(self, to_email: str, subject: str, html: str, text: str) -> bool:
+        import os
+        api_key = os.environ.get("BREVO_API_KEY", "")
+        if not api_key:
+            return False
+
+        from_email = os.environ.get("ALERT_EMAIL_FROM", "honeysentinel1@gmail.com")
+
+        payload = json.dumps({
+            "sender": {"name": "HoneySentinel AI", "email": from_email},
+            "to": [{"email": to_email}],
+            "subject": subject,
+            "htmlContent": html,
+            "textContent": text,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.brevo.com/v3/smtp/email",
+            data=payload,
+            headers={
+                "api-key": api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                print(f">>> BREVO response: {resp.status}", flush=True)
+                return resp.status == 201
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            print(f">>> BREVO HTTP ERROR {e.code}: {body}", flush=True)
+            return False
+        except Exception as e:
+            print(f">>> BREVO FAILED: {type(e).__name__}: {e}", flush=True)
+            return False
     def _send_via_resend(self, to_email: str, subject: str, html: str, text: str) -> bool:
         import os
         api_key = os.environ.get("RESEND_API_KEY", "")
@@ -140,8 +177,11 @@ class EmailService:
 
     def _send(self, to_email: str, subject: str, html: str, text: str) -> bool:
         import os
-        print(f">>> EMAIL _send called to={to_email} sendgrid={bool(os.environ.get('SENDGRID_API_KEY'))} resend={bool(os.environ.get('RESEND_API_KEY'))} smtp={os.environ.get('SMTP_USER','NOT SET')!r}", flush=True)
+        print(f">>> EMAIL _send called to={to_email} brevo={bool(os.environ.get('BREVO_API_KEY'))} sendgrid={bool(os.environ.get('SENDGRID_API_KEY'))} resend={bool(os.environ.get('RESEND_API_KEY'))} smtp={os.environ.get('SMTP_USER','NOT SET')!r}", flush=True)
 
+        if self._send_via_brevo(to_email, subject, html, text):
+            print(f">>> Email sent via Brevo to {to_email}", flush=True)
+            return True
         if self._send_via_sendgrid(to_email, subject, html, text):
             print(f">>> Email sent via SendGrid to {to_email}", flush=True)
             return True
