@@ -83,6 +83,9 @@ async def verify_otp(
     if not verification["valid"]:
         raise HTTPException(status_code=400, detail=verification["reason"])
 
+    user.is_verified = True
+    user.is_active = True
+
     audit = AuditLog(
         user_id=user.id,
         action="email_verified",

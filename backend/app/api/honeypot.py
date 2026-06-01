@@ -76,7 +76,7 @@ async def update_mode(
     if update.mode not in ("active", "passive"):
         raise HTTPException(400, "Mode must be 'active' or 'passive'")
 
-    if current_user.role not in ("admin", "analyst"):
+    if current_user.get("role") not in ("admin", "analyst"):
         raise HTTPException(403, "Insufficient permissions")
 
     return {"status": "ok", "mode": update.mode}
@@ -95,7 +95,7 @@ async def update_protocols(
                 f"Invalid protocol: {protocol}. Must be one of {valid_protocols}",
             )
 
-    if current_user.role != "admin":
+    if current_user.get("role") != "admin":
         raise HTTPException(403, "Admin permissions required")
 
     return {"status": "ok", "protocols": update.protocols}
@@ -106,7 +106,7 @@ async def block_ip(
     request: IPActionRequest,
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ("admin", "analyst"):
+    if current_user.get("role") not in ("admin", "analyst"):
         raise HTTPException(403, "Insufficient permissions")
 
     return {"status": "blocked", "ip": request.ip}
@@ -117,7 +117,7 @@ async def unblock_ip(
     request: IPActionRequest,
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "admin":
+    if current_user.get("role") != "admin":
         raise HTTPException(403, "Admin permissions required")
 
     return {"status": "unblocked", "ip": request.ip}
