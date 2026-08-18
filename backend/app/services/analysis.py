@@ -4,22 +4,51 @@ from typing import Dict, List, Optional
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
-from sqlalchemy.orm import selectinload
 
 from app.models import (
-    HoneypotSession, HoneypotNode, Alert, IndicatorOfCompromise,
-    User, AlertThreshold, AuditLog,
-    SessionStatus, AttackCategory, AttackSeverity, AttackerProfile,
-    AlertStatus,
+    Alert, AlertStatus, AttackCategory, AttackerProfile, AttackSeverity,
+    HoneypotNode, HoneypotSession, IndicatorOfCompromise, SessionStatus,
 )
-from app.schemas import DashboardStats, SessionFilter
+from app.schemas import DashboardStats
 # AI modules imported lazily below
 from app.services.geoip import geoip_service
 from app.services.alerting import alerting_service
-from app.services.report_generator import report_generator
 from app.core.encryption import encrypt_data
 
 logger = logging.getLogger(__name__)
+
+#: A single session's command list is attacker-controlled; cap what we store.
+MAX_COMMANDS = 5000
+MAX_PAYLOAD_CHARS = 1_000_000
+
+
+def _coerce_enum(enum_cls, value, default):
+    """Map an untrusted string onto an enum, falling back to a default."""
+    if value is None:
+        return default
+    try:
+        return enum_cls(str(value).strip().lower())
+    except ValueError:
+        logger.warning(
+            "Unrecognised %s value %r from honeypot; using %s",
+            enum_cls.__name__,
+            value,
+            default.value,
+        )
+        return default
+
+
+def _parse_timestamp(value, fallback: datetime) -> datetime:
+    if not value:
+        return fallback
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        logger.warning("Unparseable started_at %r; using ingest time", value)
+        return fallback
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 class AnalysisPipeline:
@@ -29,11 +58,21 @@ class AnalysisPipeline:
         session_data: Dict,
         node_id: int,
     ) -> Dict:
-        from app.ai import classifier, nlp_engine, anomaly_detector, attacker_profiler, mitre_mapper
-        attacker_ip = session_data.get("attacker_ip", "")
-        commands = session_data.get("commands", [])
-        packets = session_data.get("packets", [])
-        duration = session_data.get("duration_seconds", 0) or 0
+        # Import the singletons, not the modules: `from app.ai import
+        # classifier` bound the *module* (app/ai/__init__.py is empty), so
+        # every call raised AttributeError and no session was ever ingested.
+        # Imported lazily so loading the AI stack does not block app startup.
+        from app.ai.anomaly_detector import anomaly_detector
+        from app.ai.attacker_profiler import attacker_profiler
+        from app.ai.classifier import classifier
+        from app.ai.mitre_mapper import mitre_mapper
+        from app.ai.nlp_engine import nlp_engine
+        attacker_ip = str(session_data.get("attacker_ip", ""))[:45]
+        commands = [
+            str(c) for c in (session_data.get("commands") or [])[:MAX_COMMANDS]
+        ]
+        packets = session_data.get("packets") or []
+        duration = float(session_data.get("duration_seconds") or 0)
 
         geo = geoip_service.lookup(attacker_ip)
 
@@ -41,12 +80,13 @@ class AnalysisPipeline:
 
         nlp_result = nlp_engine.analyze_commands(commands)
 
-        payload = session_data.get("payload", "")
+        payload = str(session_data.get("payload") or "")[:MAX_PAYLOAD_CHARS]
         if payload:
             payload_analysis = nlp_engine.analyze_payload(payload)
         else:
             payload_analysis = {"is_suspicious": False, "suspicion_score": 0.0}
 
+        _now = datetime.now(timezone.utc)
         anomaly_features = {
             "session_duration": min(duration / 600, 1),
             "command_count": min(len(commands) / 50, 1),
@@ -58,7 +98,7 @@ class AnalysisPipeline:
             "payload_entropy": payload_analysis.get("suspicion_score", 0),
             "port_scan_count": min(session_data.get("port_scan_count", 0) / 50, 1),
             "error_rate": min(session_data.get("error_rate", 0) / 0.5, 1),
-            "off_hours": 1 if datetime.utcnow().hour < 6 or datetime.utcnow().hour > 22 else 0,
+            "off_hours": 1 if _now.hour < 6 or _now.hour > 22 else 0,
         }
         anomaly_result = anomaly_detector.detect(anomaly_features)
 
@@ -71,12 +111,14 @@ class AnalysisPipeline:
         iocs = self._extract_iocs(attacker_ip, nlp_result, session_data)
 
         severity = self._determine_severity(ai_result, anomaly_result, nlp_result)
+        alert_payload = None
 
         raw_commands_encrypted = encrypt_data("\n".join(commands)) if commands else None
         raw_payloads_encrypted = encrypt_data(payload) if payload else None
 
         db_session = HoneypotSession(
             node_id=node_id,
+            protocol=str(session_data.get("protocol") or "unknown")[:20],
             attacker_ip=attacker_ip,
             attacker_port=session_data.get("attacker_port"),
             geo_country=geo.get("country"),
@@ -84,23 +126,36 @@ class AnalysisPipeline:
             geo_city=geo.get("city"),
             geo_lat=geo.get("lat"),
             geo_lon=geo.get("lon"),
-            status=SessionStatus(session_data.get("status", "completed")),
-            started_at=datetime.fromisoformat(session_data["started_at"].replace("Z", "+00:00")) if session_data.get("started_at") else datetime.now(timezone.utc),
-            ended_at=datetime.now(timezone.utc),
+            status=_coerce_enum(
+                SessionStatus, session_data.get("status"), SessionStatus.COMPLETED
+            ),
+            started_at=_parse_timestamp(session_data.get("started_at"), _now),
+            ended_at=_now,
             duration_seconds=duration,
-            attack_category=AttackCategory(ai_result["category"]),
+            attack_category=_coerce_enum(
+                AttackCategory, ai_result.get("category"), AttackCategory.BENIGN
+            ),
             attack_confidence=ai_result["confidence"],
-            attacker_profile=AttackerProfile(profile_result["profile"]),
+            attacker_profile=_coerce_enum(
+                AttackerProfile,
+                profile_result.get("profile"),
+                AttackerProfile.UNKNOWN,
+            ),
             anomaly_score=anomaly_result["anomaly_score"],
             is_anomalous=anomaly_result["is_anomalous"],
             detected_tools=nlp_result.get("tool_names", []),
             detected_intents=nlp_result.get("detected_intents", []),
-            command_summary=" ".join(commands[:100]) if commands else None,
+            command_summary=" ".join(commands[:100])[:10000] if commands else None,
+            command_count=len(commands),
             mitre_tactics=mitre_result.get("tactic_ids", []),
             mitre_techniques=mitre_result.get("techniques", []),
             raw_commands_encrypted=raw_commands_encrypted,
             raw_payloads_encrypted=raw_payloads_encrypted,
-            uploaded_files=[u.get("filename", u.get("url", "")) for u in session_data.get("uploads", [])],
+            uploaded_files=[
+                str(u.get("filename") or u.get("url") or "")
+                for u in (session_data.get("uploads") or [])
+                if isinstance(u, dict)
+            ],
         )
         db.add(db_session)
         await db.flush()
@@ -129,7 +184,7 @@ class AnalysisPipeline:
             db.add(alert)
             await db.flush()
 
-            await alerting_service.send_alert({
+            alert_payload = {
                 "severity": severity.value,
                 "title": alert.title,
                 "description": alert.description,
@@ -141,9 +196,12 @@ class AnalysisPipeline:
                 "mitre_techniques": mitre_result.get("techniques", []),
                 "timestamp": db_session.started_at.isoformat(),
                 "session_uuid": db_session.session_uuid,
-            })
+            }
 
         await db.commit()
+
+        if alert_payload is not None:
+            await alerting_service.send_alert(alert_payload)
 
         return {
             "session_id": db_session.id,
@@ -248,7 +306,7 @@ class DashboardService:
         )
         high_alerts = (await db.execute(high_alerts_q)).scalar() or 0
 
-        active_nodes_q = select(func.count(HoneypotNode.id)).where(HoneypotNode.is_active == True)
+        active_nodes_q = select(func.count(HoneypotNode.id)).where(HoneypotNode.is_active.is_(True))
         active_nodes = (await db.execute(active_nodes_q)).scalar() or 0
 
         unique_ips_q = select(func.count(func.distinct(HoneypotSession.attacker_ip)))
@@ -322,9 +380,14 @@ class DashboardService:
         events = []
         for s in sessions:
             events.append({
+                # The UI joins alerts to their source session by numeric id;
+                # only the UUID was exposed, so the join never matched.
+                "session_id": s.id,
                 "session_uuid": s.session_uuid,
+                "protocol": s.protocol,
                 "attacker_ip": s.attacker_ip,
                 "geo_country": s.geo_country,
+                "geo_country_name": s.geo_country_name,
                 "geo_lat": s.geo_lat,
                 "geo_lon": s.geo_lon,
                 "attack_category": s.attack_category.value if s.attack_category else None,

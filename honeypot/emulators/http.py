@@ -6,6 +6,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from honeypot.core.config import config
+from honeypot.core.tls import build_tls_context
 from honeypot.core.session import session_manager
 from honeypot.core.modes import mode_handler
 from honeypot.emulators.base import BaseEmulator
@@ -16,10 +17,16 @@ logger = logging.getLogger(__name__)
 
 
 class HTTPHoneypot(BaseEmulator):
+    MAX_REQUEST_LINE = 8192
+    MAX_HEADER_COUNT = 100
+    MAX_BODY_BYTES = 1024 * 1024
+
     def __init__(self, use_tls: bool = False):
         protocol = "https" if use_tls else "http"
         port = config.https_port if use_tls else config.http_port
-        super().__init__(protocol, port)
+        super().__init__(
+            protocol, port, ssl_context=build_tls_context() if use_tls else None
+        )
         self.use_tls = use_tls
         self._vulnerable_endpoints = {
             "/admin": "admin_panel",
@@ -82,8 +89,28 @@ class HTTPHoneypot(BaseEmulator):
                     if not request_str:
                         continue
 
+                    if len(request_str) > self.MAX_REQUEST_LINE:
+                        await self._send_response(
+                            writer,
+                            self._build_response(414, "URI Too Long", ""),
+                        )
+                        break
+
                     headers = await self._read_headers(reader)
-                    content_length = int(headers.get("content-length", 0))
+
+                    try:
+                        content_length = int(headers.get("content-length", 0))
+                    except ValueError:
+                        content_length = 0
+                    if content_length > self.MAX_BODY_BYTES:
+                        await self._send_response(
+                            writer,
+                            self._build_response(
+                                413, "Payload Too Large", "Request body too large"
+                            ),
+                        )
+                        break
+
                     body = ""
                     if content_length > 0:
                         body_bytes = await asyncio.wait_for(
@@ -121,8 +148,12 @@ class HTTPHoneypot(BaseEmulator):
     ) -> dict[str, str]:
         headers = {}
         try:
-            while True:
-                line = await asyncio.wait_for(reader.readline(), timeout=10)
+            while len(headers) < self.MAX_HEADER_COUNT:
+                line = await asyncio.wait_for(
+                    reader.readline(), timeout=10
+                )
+                if not line:
+                    break
                 line_str = line.decode("utf-8", errors="replace").strip()
                 if not line_str:
                     break
@@ -260,7 +291,7 @@ class HTTPHoneypot(BaseEmulator):
             f"<h1>Not Found</h1>\n"
             f"<p>The requested URL {path} was not found on this server.</p>\n"
             f"<hr>\n"
-            f"<address>Apache/2.4.52 (Ubuntu) Server at "
+            f"<address>{fingerprint_engine.get_http_server_header()} Server at "
             f"{headers.get('host', 'localhost')} Port {self.port}</address>\n"
             f"</body></html>\n",
             {"Content-Type": "text/html; charset=UTF-8"},

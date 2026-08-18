@@ -17,8 +17,9 @@ export default function Signup() {
     if (!form.name.trim()) e.name = 'Full name is required.'
     if (!form.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email))
       e.email = 'A valid email address is required.'
-    if (!form.password || form.password.length < 8)
-      e.password = 'Password must be at least 8 characters.'
+    // Must match the backend's minimum, or the API rejects the form.
+    if (!form.password || form.password.length < 12)
+      e.password = 'Password must be at least 12 characters.'
     if (form.password !== form.confirm) e.confirm = 'Passwords do not match.'
     return e
   }

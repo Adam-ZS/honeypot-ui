@@ -1,182 +1,252 @@
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
 
-function getHeaders() {
-  const token = localStorage.getItem("access_token");
-  const headers = {
-    "Content-Type": "application/json",
-    "ngrok-skip-browser-warning": "69420",
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return headers;
+const ACCESS_TOKEN_KEY = 'access_token'
+const REFRESH_TOKEN_KEY = 'refresh_token'
+
+export function getAccessToken() {
+  return localStorage.getItem(ACCESS_TOKEN_KEY)
 }
 
-async function request(path, options = {}) {
-  const url = `${API_BASE}${path}`;
-  const res = await fetch(url, {
+export function setTokens({ access_token, refresh_token }) {
+  if (access_token) localStorage.setItem(ACCESS_TOKEN_KEY, access_token)
+  if (refresh_token) localStorage.setItem(REFRESH_TOKEN_KEY, refresh_token)
+}
+
+export function clearTokens() {
+  localStorage.removeItem(ACCESS_TOKEN_KEY)
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+/** Raised for any non-2xx response, carrying the HTTP status. */
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+let onUnauthorized = () => {}
+export function setUnauthorizedHandler(handler) {
+  onUnauthorized = handler
+}
+
+// A single in-flight refresh shared by every concurrent 401, so a page with
+// four parallel requests does not fire four refreshes and invalidate itself.
+let refreshInFlight = null
+
+async function refreshAccessToken() {
+  const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
+  if (!refreshToken) return false
+
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        })
+        if (!res.ok) return false
+        setTokens(await res.json())
+        return true
+      } catch {
+        return false
+      } finally {
+        // Cleared on the next tick so concurrent callers all observe the
+        // same settled promise.
+        setTimeout(() => { refreshInFlight = null }, 0)
+      }
+    })()
+  }
+  return refreshInFlight
+}
+
+function buildHeaders(extra) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'ngrok-skip-browser-warning': '69420',
+    ...extra,
+  }
+  const token = getAccessToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  return headers
+}
+
+async function readError(res) {
+  try {
+    const body = await res.json()
+    if (typeof body.detail === 'string') return body.detail
+    // FastAPI validation errors arrive as a list of objects; rendering that
+    // object directly produced "[object Object]" in the UI.
+    if (Array.isArray(body.detail)) {
+      return body.detail.map((d) => d.msg || JSON.stringify(d)).join('; ')
+    }
+    return res.statusText || 'Request failed'
+  } catch {
+    return res.statusText || 'Request failed'
+  }
+}
+
+async function request(path, options = {}, { retry = true } = {}) {
+  let res
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: buildHeaders(options.headers),
+    })
+  } catch {
+    throw new ApiError('Cannot reach the API. Check your connection.', 0)
+  }
+
+  if (res.status === 401 && retry) {
+    // Try to refresh once before giving up; previously any 401 wiped the
+    // session, so users were logged out every hour on the dot.
+    if (await refreshAccessToken()) {
+      return request(path, options, { retry: false })
+    }
+    clearTokens()
+    onUnauthorized()
+    throw new ApiError('Your session has expired. Please sign in again.', 401)
+  }
+
+  if (!res.ok) throw new ApiError(await readError(res), res.status)
+  if (res.status === 204) return null
+
+  const contentType = res.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) return res.json()
+  return res.text()
+}
+
+/** POST that returns the raw body plus its filename, for file downloads. */
+async function download(path, options = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
     ...options,
-    headers: { ...getHeaders(), ...options.headers },
-  });
+    headers: buildHeaders(options.headers),
+  })
+  if (!res.ok) throw new ApiError(await readError(res), res.status)
 
-  if (res.status === 401) {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-    window.location.href = "/login";
-    throw new Error("Unauthorized");
+  const disposition = res.headers.get('content-disposition') || ''
+  const match = disposition.match(/filename="?([^"]+)"?/)
+  return {
+    blob: await res.blob(),
+    filename: match ? match[1] : 'export',
   }
+}
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Request failed");
-  }
-
-  if (res.status === 204) return null;
-  return res.json();
+function toQuery(params = {}) {
+  const qs = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    if (Array.isArray(value)) value.forEach((item) => qs.append(key, item))
+    else qs.append(key, value)
+  })
+  return qs.toString()
 }
 
 export const api = {
   auth: {
     login: (email, password) =>
-      request("/auth/login", {
-        method: "POST",
+      request('/auth/login', {
+        method: 'POST',
         body: JSON.stringify({ email, password }),
       }),
     register: (data) =>
-      request("/auth/register", {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
+      request('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
     verifyOtp: (data) =>
-      request("/auth/verify-otp", {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
+      request('/auth/verify-otp', { method: 'POST', body: JSON.stringify(data) }),
     resendOtp: (data) =>
-      request("/auth/resend-otp", {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
+      request('/auth/resend-otp', { method: 'POST', body: JSON.stringify(data) }),
     requestPasswordReset: (email) =>
-      request("/auth/request-password-reset", {
-        method: "POST",
+      request('/auth/request-password-reset', {
+        method: 'POST',
         body: JSON.stringify({ email }),
       }),
     resetPassword: (data) =>
-      request("/auth/reset-password", {
-        method: "POST",
+      request('/auth/reset-password', {
+        method: 'POST',
         body: JSON.stringify(data),
       }),
-    me: () => request("/auth/me"),
+    me: () => request('/auth/me'),
   },
 
   dashboard: {
-    stats: () => request("/dashboard/stats"),
+    stats: () => request('/dashboard/stats'),
     liveEvents: (limit = 50) => request(`/dashboard/live-events?limit=${limit}`),
   },
 
   sessions: {
-    list: (params = {}) => {
-      const qs = new URLSearchParams();
-      Object.entries(params).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== "") qs.append(k, v);
-      });
-      return request(`/sessions/?${qs.toString()}`);
-    },
+    list: (params = {}) => request(`/sessions/?${toQuery(params)}`),
     get: (id) => request(`/sessions/${id}`),
     getByUuid: (uuid) => request(`/sessions/uuid/${uuid}`),
   },
 
   alerts: {
-    list: (params = {}) => {
-      const qs = new URLSearchParams();
-      Object.entries(params).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== "") qs.append(k, v);
-      });
-      return request(`/alerts/?${qs.toString()}`);
-    },
+    list: (params = {}) => request(`/alerts/?${toQuery(params)}`),
     get: (id) => request(`/alerts/${id}`),
     update: (id, data) =>
-      request(`/alerts/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify(data),
-      }),
-    stats: () => request("/alerts/stats"),
+      request(`/alerts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    stats: () => request('/alerts/stats'),
   },
 
   nodes: {
     list: (activeOnly = false) => request(`/nodes/?active_only=${activeOnly}`),
     get: (id) => request(`/nodes/${id}`),
     create: (data) =>
-      request("/nodes/", {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
+      request('/nodes/', { method: 'POST', body: JSON.stringify(data) }),
     update: (id, data) =>
-      request(`/nodes/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify(data),
-      }),
-    delete: (id) =>
-      request(`/nodes/${id}`, { method: "DELETE" }),
+      request(`/nodes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    delete: (id) => request(`/nodes/${id}`, { method: 'DELETE' }),
   },
 
   settings: {
-    thresholds: () => request("/settings/thresholds"),
+    thresholds: () => request('/settings/thresholds'),
     createThreshold: (data) =>
-      request("/settings/thresholds", {
-        method: "POST",
+      request('/settings/thresholds', {
+        method: 'POST',
         body: JSON.stringify(data),
       }),
     updateThreshold: (id, data) =>
       request(`/settings/thresholds/${id}`, {
-        method: "PATCH",
+        method: 'PATCH',
         body: JSON.stringify(data),
       }),
     deleteThreshold: (id) =>
-      request(`/settings/thresholds/${id}`, { method: "DELETE" }),
-    systemConfig: () => request("/settings/system"),
+      request(`/settings/thresholds/${id}`, { method: 'DELETE' }),
+    systemConfig: () => request('/settings/system'),
     updateSystemConfig: (data) =>
-      request("/settings/system", {
-        method: "PATCH",
+      request('/settings/system', {
+        method: 'PATCH',
         body: JSON.stringify(data),
       }),
   },
 
   export: {
-    sessions: (params = {}) => {
-      const qs = new URLSearchParams();
-      Object.entries(params).forEach(([k, v]) => {
-        if (Array.isArray(v)) v.forEach((item) => qs.append(k, item));
-        else if (v !== undefined && v !== null && v !== "") qs.append(k, v);
-      });
-      return request(`/export/?${qs.toString()}`);
-    },
+    // The backend route is POST; this used to issue a GET and always 405'd.
+    sessions: (params = {}) =>
+      download(`/export/?${toQuery(params)}`, { method: 'POST' }),
   },
 
   honeypot: {
-    status: () => request("/honeypot/status"),
-    securityStatus: () => request("/honeypot/security-status"),
+    status: () => request('/honeypot/status'),
+    securityStatus: () => request('/honeypot/security-status'),
     updateMode: (mode) =>
-      request("/honeypot/mode", {
-        method: "PATCH",
+      request('/honeypot/mode', {
+        method: 'PATCH',
         body: JSON.stringify({ mode }),
       }),
-    updateProtocols: (protocols) =>
-      request("/honeypot/protocols", {
-        method: "PATCH",
-        body: JSON.stringify({ protocols }),
-      }),
     blockIP: (ip) =>
-      request("/honeypot/block-ip", {
-        method: "POST",
+      request('/honeypot/block-ip', {
+        method: 'POST',
         body: JSON.stringify({ ip }),
       }),
     unblockIP: (ip) =>
-      request("/honeypot/unblock-ip", {
-        method: "POST",
+      request('/honeypot/unblock-ip', {
+        method: 'POST',
         body: JSON.stringify({ ip }),
       }),
-    blockedIPs: () => request("/honeypot/blocked-ips"),
-    threatActors: () => request("/honeypot/threat-actors"),
-    activeSessions: () => request("/honeypot/sessions/active"),
+    blockedIPs: () => request('/honeypot/blocked-ips'),
+    threatActors: () => request('/honeypot/threat-actors'),
+    activeSessions: () => request('/honeypot/sessions/active'),
   },
-};
+}

@@ -15,15 +15,42 @@ branch_labels = None
 depends_on = None
 
 
+def _create_enum(name: str, values: list[str]) -> None:
+    """Create an enum type only if it does not already exist."""
+    labels = ", ".join(f"'{value}'" for value in values)
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{name}') THEN
+                CREATE TYPE {name} AS ENUM ({labels});
+            END IF;
+        END
+        $$;
+        """
+    )
+
+
 def upgrade() -> None:
     # --- ENUM TYPES ---
-    op.execute("CREATE TYPE IF NOT EXISTS userrole AS ENUM ('viewer', 'analyst', 'admin')")
-    op.execute("CREATE TYPE IF NOT EXISTS honeypotmode AS ENUM ('active', 'passive')")
-    op.execute("CREATE TYPE IF NOT EXISTS sessionstatus AS ENUM ('active', 'completed', 'terminated')")
-    op.execute("CREATE TYPE IF NOT EXISTS attackseverity AS ENUM ('low', 'medium', 'high', 'critical')")
-    op.execute("CREATE TYPE IF NOT EXISTS attackcategory AS ENUM ('benign', 'reconnaissance', 'exploitation', 'exfiltration')")
-    op.execute("CREATE TYPE IF NOT EXISTS attackerprofile AS ENUM ('script_kiddie', 'automated_bot', 'skilled_attacker', 'apt', 'unknown')")
-    op.execute("CREATE TYPE IF NOT EXISTS alertstatus AS ENUM ('new', 'acknowledged', 'resolved', 'false_positive')")
+    # PostgreSQL has no `CREATE TYPE ... IF NOT EXISTS`; the previous version
+    # used it and every migration run failed with a syntax error, which is why
+    # startup silently fell back to metadata.create_all.
+    _create_enum("userrole", ["viewer", "analyst", "admin"])
+    _create_enum("honeypotmode", ["active", "passive"])
+    _create_enum("sessionstatus", ["active", "completed", "terminated"])
+    _create_enum("attackseverity", ["low", "medium", "high", "critical"])
+    _create_enum(
+        "attackcategory",
+        ["benign", "reconnaissance", "exploitation", "exfiltration"],
+    )
+    _create_enum(
+        "attackerprofile",
+        ["script_kiddie", "automated_bot", "skilled_attacker", "apt", "unknown"],
+    )
+    _create_enum(
+        "alertstatus", ["new", "acknowledged", "resolved", "false_positive"]
+    )
 
     # --- users ---
     op.create_table(

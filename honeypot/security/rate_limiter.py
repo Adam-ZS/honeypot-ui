@@ -71,6 +71,10 @@ class RateLimiter:
             if expiry > now
         ]
 
+    async def block_ip(self, ip: str, duration: Optional[int] = None):
+        self._blocked[ip] = time.time() + (duration or self._block_duration)
+        logger.info(f"IP {ip} manually blocked")
+
     async def unblock_ip(self, ip: str):
         if ip in self._blocked:
             del self._blocked[ip]

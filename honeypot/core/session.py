@@ -54,6 +54,7 @@ class SessionRecord:
     def to_backend_payload(self, node_id: int = 1) -> dict[str, Any]:
         command_strings = [c["command"] for c in self.commands]
         return {
+            "protocol": self.protocol,
             "attacker_ip": self.source_ip,
             "attacker_port": self.source_port,
             "started_at": self.start_datetime,
@@ -103,13 +104,26 @@ class SessionRecord:
 
 
 class SessionManager:
+    #: Uploads are attacker-controlled; cap what a single session can persist.
+    MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+    #: Finished sessions are retained only for the status endpoint.
+    MAX_RETAINED_SESSIONS = 1000
+
     def __init__(self):
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
         self._node_id: int = 1
+        self._total_sessions: int = 0
+        # asyncio only holds a weak reference to tasks, so a fire-and-forget
+        # ingest could be garbage collected mid-flight.
+        self._background: set[asyncio.Task] = set()
         Path(config.session_capture_dir).mkdir(parents=True, exist_ok=True)
         Path(config.file_capture_dir).mkdir(parents=True, exist_ok=True)
         Path(config.log_dir).mkdir(parents=True, exist_ok=True)
+
+    @property
+    def node_id(self) -> int:
+        return self._node_id
 
     async def set_node_id(self, node_id: int):
         self._node_id = node_id
@@ -132,6 +146,8 @@ class SessionManager:
         )
         async with self._lock:
             self._sessions[session_id] = session
+            self._total_sessions += 1
+            self._evict_finished_locked()
         logger.info(f"New session {session_id} from {source_ip}:{source_port} ({protocol})")
         return session_id
 
@@ -142,11 +158,36 @@ class SessionManager:
     async def end_session(self, session_id: str) -> Optional[SessionRecord]:
         async with self._lock:
             session = self._sessions.get(session_id)
-            if session:
-                session.end_time = time.time()
-                await self._persist_session(session)
-                asyncio.create_task(self._send_to_backend(session))
-            return session
+            if session is None or session.end_time is not None:
+                # Already ended; do not persist or ingest the session twice.
+                return session
+            session.end_time = time.time()
+
+        await self._persist_session(session)
+        self._spawn(self._send_to_backend(session))
+        return session
+
+    def _spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
+
+    def _evict_finished_locked(self):
+        """Drop the oldest finished sessions once the cache is oversized.
+
+        Without this the process retained every session it ever handled, which
+        is an unbounded memory leak on a service exposed to the internet.
+        """
+        if len(self._sessions) <= self.MAX_RETAINED_SESSIONS:
+            return
+        finished = sorted(
+            (s for s in self._sessions.values() if s.end_time is not None),
+            key=lambda s: s.end_time or 0,
+        )
+        overflow = len(self._sessions) - self.MAX_RETAINED_SESSIONS
+        for session in finished[:overflow]:
+            self._sessions.pop(session.session_id, None)
 
     async def record_command(
         self, session_id: str, command: str, output: str = "", exit_code: int = 0
@@ -167,7 +208,15 @@ class SessionManager:
     ):
         session = await self.get_session(session_id)
         if session:
+            if len(content) > self.MAX_UPLOAD_BYTES:
+                logger.warning(
+                    f"Discarding {len(content)} byte upload from session "
+                    f"{session_id}: exceeds {self.MAX_UPLOAD_BYTES} byte cap"
+                )
+                return
             file_hash = hashlib.sha256(content).hexdigest()
+            # Name the file after its own digest so an attacker-supplied
+            # filename can never influence where it lands on disk.
             file_path = os.path.join(config.file_capture_dir, file_hash)
             with open(file_path, "wb") as f:
                 f.write(content)
@@ -276,34 +325,34 @@ class SessionManager:
             logger.error(f"Error sending session to backend: {e}")
 
     async def register_node(self) -> int:
+        """Claim a node id from the backend using the shared ingest token.
+
+        The previous implementation POSTed to the admin-only ``/nodes/``
+        endpoint with no credentials, so it always failed and silently fell
+        back to node id 1.
+        """
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{config.backend_api_url}/nodes/",
+                    f"{config.backend_api_url}/nodes/register-internal",
                     json={
-                        "name": "honeypot-engine-main",
+                        "name": config.node_name,
                         "protocol": "multi",
-                        "ip_address": "0.0.0.0",
-                        "port": 0,
+                        "ip_address": config.bind_address,
+                        "port": config.ssh_port,
                         "mode": config.operational_mode.value,
                     },
+                    headers={"X-Honeypot-Token": config.ingest_token},
                     timeout=10,
                 )
-                if response.status_code in (200, 201, 409):
-                    if response.status_code == 409:
-                        list_resp = await client.get(
-                            f"{config.backend_api_url}/nodes/",
-                            timeout=10,
-                        )
-                        nodes = list_resp.json()
-                        for node in nodes:
-                            if node.get("name") == "honeypot-engine-main":
-                                self._node_id = node["id"]
-                                return self._node_id
-                    else:
-                        data = response.json()
-                        self._node_id = data.get("id", 1)
-                        return self._node_id
+                if response.status_code in (200, 201):
+                    self._node_id = response.json()["id"]
+                    logger.info(f"Registered as honeypot node {self._node_id}")
+                    return self._node_id
+                logger.warning(
+                    f"Node registration rejected: HTTP {response.status_code} "
+                    f"- {response.text[:200]}"
+                )
         except Exception as e:
             logger.warning(f"Could not register honeypot node: {e}")
         self._node_id = 1
@@ -317,7 +366,13 @@ class SessionManager:
 
     async def get_session_count(self) -> int:
         async with self._lock:
-            return len(self._sessions)
+            return self._total_sessions
+
+    async def drain(self):
+        """Wait for in-flight backend ingests before shutting down."""
+        pending = list(self._background)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 session_manager = SessionManager()

@@ -1,9 +1,11 @@
 import asyncio
 import random
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
 from honeypot.core.config import OperationalMode, config
+from honeypot.adaptive.fingerprint import fingerprint_engine
 from honeypot.core.session import session_manager
 
 
@@ -23,8 +25,8 @@ class ModeHandler:
                 "ftp_login_fail": "530 Login incorrect.\n",
                 "ftp_success": "230 Login successful.\n",
                 "ftp_prompt": "ftp> ",
-                "http_404": "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\">\n<html><head>\n<title>404 Not Found</title>\n</head><body>\n<h1>Not Found</h1>\n<p>The requested URL was not found on this server.</p>\n<hr>\n<address>Apache/2.4.52 (Ubuntu) Server at {host} Port {port}</address>\n</body></html>\n",
-                "http_200": "<!DOCTYPE html>\n<html>\n<head><title>Default Page</title></head>\n<body>\n<h1>It works!</h1>\n<p>This is the default web page for this server.</p>\n<hr>\n<address>Apache/2.4.52 (Ubuntu) Server at {host} Port {port}</address>\n</body>\n</html>\n",
+                "http_404": "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\">\n<html><head>\n<title>404 Not Found</title>\n</head><body>\n<h1>Not Found</h1>\n<p>The requested URL was not found on this server.</p>\n<hr>\n<address>{server} Server at {host} Port {port}</address>\n</body></html>\n",
+                "http_200": "<!DOCTYPE html>\n<html>\n<head><title>Default Page</title></head>\n<body>\n<h1>It works!</h1>\n<p>This is the default web page for this server.</p>\n<hr>\n<address>{server} Server at {host} Port {port}</address>\n</body>\n</html>\n",
             },
             "passive": {
                 "ssh_welcome": "",
@@ -77,31 +79,22 @@ class ModeHandler:
     async def _log_passive(
         self, session_id: str, protocol: str, interaction_type: str, data: dict
     ):
-        if interaction_type == "command":
-            await session_manager.record_command(
-                session_id, data.get("command", ""), "", 0
-            )
-        elif interaction_type == "auth":
-            await session_manager.record_auth_attempt(
-                session_id,
-                data.get("username", ""),
-                data.get("password", ""),
-                False,
-            )
-        elif interaction_type == "file_upload":
-            content = data.get("content", b"")
-            if isinstance(content, str):
-                content = content.encode()
-            await session_manager.record_file_upload(
-                session_id,
-                data.get("filename", "unknown"),
-                content,
-                data.get("path", ""),
-            )
-        elif interaction_type == "network":
-            await session_manager.record_network_event(
-                session_id, data.get("event_type", "unknown"), data
-            )
+        """Record an interaction that the emulator itself does not capture.
+
+        Emulators already persist commands, credentials, keystrokes and
+        network events as they read them off the wire, so passive mode only
+        needs to note that a request arrived and was deliberately not answered.
+        Re-recording here would duplicate every command in the session.
+        """
+        await session_manager.record_network_event(
+            session_id,
+            "passive_observation",
+            {
+                "protocol": protocol,
+                "interaction_type": interaction_type,
+                "responded": False,
+            },
+        )
 
     async def _generate_active_response(
         self, session_id: str, protocol: str, interaction_type: str, data: dict
@@ -121,8 +114,6 @@ class ModeHandler:
         self, session_id: str, interaction_type: str, data: dict, templates: dict
     ) -> str:
         if interaction_type == "welcome":
-            from datetime import datetime, timezone
-
             return templates["ssh_welcome"].format(
                 login_time=datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y"),
                 source_ip=data.get("source_ip", "0.0.0.0"),
@@ -130,7 +121,7 @@ class ModeHandler:
 
         elif interaction_type == "prompt":
             is_root = data.get("is_root", False)
-            hostname = data.get("hostname", "honeypot")
+            hostname = data.get("hostname") or fingerprint_engine.get_fake_hostname()
             cwd = data.get("cwd", "~")
             prompt_char = "#" if is_root else "$"
             return f"{data.get('username', 'user')}@{hostname}:{cwd}{prompt_char} "
@@ -150,7 +141,8 @@ class ModeHandler:
     async def _execute_emulated_command(
         self, session_id: str, cmd: str, data: dict
     ) -> str:
-        from datetime import datetime, timezone
+        hostname = data.get("hostname") or fingerprint_engine.get_fake_hostname()
+        os_sig = fingerprint_engine.get_os_signature()
 
         fake_fs = {
             "/": ["bin", "etc", "home", "opt", "root", "tmp", "usr", "var", "srv"],
@@ -173,10 +165,10 @@ class ModeHandler:
             "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
             "bin:x:2:2:bin:/bin:/usr/sbin/nologin\n"
             "user:x:1000:1000:User:/home/user:/bin/bash\n",
-            "/etc/hostname": "honeypot\n",
+            "/etc/hostname": f"{hostname}\n",
             "/etc/hosts": "127.0.0.1\tlocalhost\n"
             "::1\tlocalhost ip6-localhost ip6-loopback\n"
-            "10.0.0.5\thoneypot\n",
+            "10.0.0.5\t" + hostname + "\n",
         }
 
         if cmd == "ls" or cmd.startswith("ls "):
@@ -191,48 +183,43 @@ class ModeHandler:
                 size = "4096" if is_dir else str(random.randint(100, 50000))
                 date = datetime.now(timezone.utc).strftime("%b %d %H:%M")
                 result += f"{perms} 1 root root {size:>6} {date} {entry}\n"
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "pwd":
             result = data.get("cwd", "/home/user") + "\n"
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "whoami":
             result = data.get("username", "user") + "\n"
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "id":
             uid = 0 if data.get("is_root") else 1000
             result = f"uid={uid}({data.get('username', 'user')}) gid={uid}({data.get('username', 'user')}) groups={uid}({data.get('username', 'user')})\n"
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "uname" or cmd == "uname -a":
-            result = "Linux honeypot 5.15.0-91-generic #101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux\n"
-            await session_manager.record_command(session_id, cmd, result)
+            result = (
+                f"Linux {hostname} {os_sig['kernel']} #101-Ubuntu SMP "
+                f"Tue Nov 14 13:30:08 UTC 2023 {os_sig['arch']} "
+                f"{os_sig['arch']} {os_sig['arch']} GNU/Linux\n"
+            )
             return result
 
         elif cmd == "cat /etc/passwd":
             result = fake_files["/etc/passwd"]
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "cat /etc/hostname":
             result = fake_files["/etc/hostname"]
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "cat /etc/hosts":
             result = fake_files["/etc/hosts"]
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "hostname":
-            result = "honeypot\n"
-            await session_manager.record_command(session_id, cmd, result)
+            result = f"{hostname}\n"
             return result
 
         elif cmd == "ifconfig" or cmd == "ip addr":
@@ -246,7 +233,6 @@ class ModeHandler:
                 "lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536\n"
                 "        inet 127.0.0.1  netmask 255.0.0.0\n"
             )
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "ps aux" or cmd == "ps -ef":
@@ -259,7 +245,6 @@ class ModeHandler:
                 "www-data     457  0.0  0.2  35840  8192 ?        S    00:00   0:00 /usr/sbin/apache2 -k start\n"
                 "user         789  0.0  0.1  10240  2560 pts/0    Ss   00:01   0:00 -bash\n"
             )
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "netstat -tlnp" or cmd == "ss -tlnp":
@@ -270,12 +255,10 @@ class ModeHandler:
                 "tcp        0      0 0.0.0.0:443             0.0.0.0:*               LISTEN      456/apache2\n"
                 "tcp        0      0 0.0.0.0:21              0.0.0.0:*               LISTEN      345/vsftpd\n"
             )
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "wget" or cmd.startswith("wget ") or cmd == "curl" or cmd.startswith("curl "):
             result = f"bash: {cmd.split()[0]}: command not found\n"
-            await session_manager.record_command(session_id, cmd, result, 127)
             return result
 
         elif cmd.startswith("cd "):
@@ -289,17 +272,14 @@ class ModeHandler:
                 "GNU bash, version 5.1.16(1)-release (x86_64-pc-linux-gnu)\n"
                 "These shell commands are defined internally.  Type `help' to see this list.\n"
             )
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd.startswith("echo "):
             result = cmd[5:] + "\n"
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd.startswith("python") or cmd.startswith("perl") or cmd.startswith("ruby"):
             result = f"bash: {cmd.split()[0]}: command not found\n"
-            await session_manager.record_command(session_id, cmd, result, 127)
             return result
 
         elif any(
@@ -317,22 +297,18 @@ class ModeHandler:
             ]
         ):
             result = f"bash: {cmd.split()[0]}: command not found\n"
-            await session_manager.record_command(session_id, cmd, result, 127)
             return result
 
         elif cmd.startswith("chmod") or cmd.startswith("chown"):
             result = ""
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd.startswith("rm ") or cmd.startswith("mkdir ") or cmd.startswith("touch "):
             result = ""
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "history":
             result = "    1  ls -la\n    2  cat /etc/passwd\n    3  whoami\n"
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         elif cmd == "env" or cmd == "printenv":
@@ -344,12 +320,10 @@ class ModeHandler:
                 "LANG=en_US.UTF-8\n"
                 "TERM=xterm-256color\n"
             )
-            await session_manager.record_command(session_id, cmd, result)
             return result
 
         else:
             result = f"bash: {cmd.split()[0] if cmd else 'command'}: command not found\n"
-            await session_manager.record_command(session_id, cmd, result, 127)
             return result
 
     async def _ftp_response(
@@ -378,7 +352,6 @@ class ModeHandler:
                 "-rw-r--r--    1 0        0            2048 Jan 15 10:30 config.bak\n"
                 "226 Directory send OK.\n"
             )
-            await session_manager.record_command(session_id, "LIST", result)
             return result
 
         elif interaction_type == "get":
@@ -433,6 +406,7 @@ class ModeHandler:
             if path == "/" or path == "/index.html":
                 return self._build_http_response(
                     200, "OK", templates["http_200"].format(
+                        server=fingerprint_engine.get_http_server_header(),
                         host=headers.get("Host", "localhost"),
                         port=config.http_port,
                     )
@@ -454,6 +428,7 @@ class ModeHandler:
                     404,
                     "Not Found",
                     templates["http_404"].format(
+                        server=fingerprint_engine.get_http_server_header(),
                         host=headers.get("Host", "localhost"),
                         port=config.http_port,
                     ),
@@ -463,6 +438,7 @@ class ModeHandler:
                     404,
                     "Not Found",
                     templates["http_404"].format(
+                        server=fingerprint_engine.get_http_server_header(),
                         host=headers.get("Host", "localhost"),
                         port=config.http_port,
                     ),
@@ -508,11 +484,11 @@ class ModeHandler:
         extra_headers: Optional[dict] = None,
     ) -> str:
         headers = {
-            "Server": "Apache/2.4.52 (Ubuntu)",
+            "Server": fingerprint_engine.get_http_server_header(),
             "Content-Type": "text/html; charset=UTF-8",
             "Content-Length": str(len(body.encode())),
             "Connection": "close",
-            "X-Powered-By": "PHP/8.1.2",
+            "X-Powered-By": fingerprint_engine.get_x_powered_by(),
         }
         if extra_headers:
             headers.update(extra_headers)

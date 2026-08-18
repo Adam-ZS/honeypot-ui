@@ -225,9 +225,19 @@ class AdaptiveEngine:
     async def get_profile(self, ip: str) -> Optional[ActorProfile]:
         return self._profiles.get(ip)
 
+    MAX_PROFILES = 5000
+
+    def _evict_stale_profiles(self):
+        if len(self._profiles) <= self.MAX_PROFILES:
+            return
+        stale = sorted(self._profiles.values(), key=lambda p: p.last_seen)
+        for profile in stale[: len(self._profiles) - self.MAX_PROFILES]:
+            self._profiles.pop(profile.ip_address, None)
+
     async def _get_or_create_profile(self, ip: str) -> ActorProfile:
         if ip not in self._profiles:
             self._profiles[ip] = ActorProfile(ip_address=ip)
+            self._evict_stale_profiles()
         return self._profiles[ip]
 
     async def get_all_profiles(self) -> list[ActorProfile]:

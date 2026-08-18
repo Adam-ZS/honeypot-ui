@@ -26,8 +26,11 @@ class SSHSessionState:
 
 
 class SSHHoneypot(BaseEmulator):
+    MAX_COMMAND_LENGTH = 4096
+
     def __init__(self):
         super().__init__("ssh", config.ssh_port)
+        self._hostname = fingerprint_engine.get_fake_hostname()
         self._fake_users = {
             "root": "root",
             "admin": "admin",
@@ -68,13 +71,6 @@ class SSHHoneypot(BaseEmulator):
                 await self._handle_shell_session(
                     reader, writer, session_id, state, source_ip
                 )
-            else:
-                await session_manager.record_auth_attempt(
-                    session_id,
-                    state.username or "unknown",
-                    state.password or "",
-                    False,
-                )
 
         except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
             pass
@@ -109,8 +105,7 @@ class SSHHoneypot(BaseEmulator):
                 session_id, "ssh_client_banner", {"banner": client_banner_str}
             )
         except asyncio.TimeoutError:
-            writer.close()
-            return
+            raise ConnectionResetError("client never sent an SSH identification string")
 
     async def _handle_auth(
         self,
@@ -155,14 +150,16 @@ class SSHHoneypot(BaseEmulator):
                 password = password.replace("\r", "").replace("\n", "")
 
                 state.password = password
-                await session_manager.record_auth_attempt(
-                    session_id, username, password, True
-                )
 
             except asyncio.TimeoutError:
                 return
 
-            if username in self._allowed_users:
+            accepted = username in self._allowed_users
+            await session_manager.record_auth_attempt(
+                session_id, username, password, accepted
+            )
+
+            if accepted:
                 state.authenticated = True
                 if username == "root":
                     state.is_root = True
@@ -198,7 +195,7 @@ class SSHHoneypot(BaseEmulator):
             session_id, "ssh", "prompt",
             {
                 "username": state.username,
-                "hostname": "honeypot",
+                "hostname": self._hostname,
                 "cwd": state.cwd,
                 "is_root": state.is_root,
             },
@@ -239,7 +236,6 @@ class SSHHoneypot(BaseEmulator):
                             )
 
                             if command in ("exit", "logout"):
-                                await session_manager.end_session(session_id)
                                 return
 
                             await self._send_response(writer, response)
@@ -248,7 +244,7 @@ class SSHHoneypot(BaseEmulator):
                                 session_id, "ssh", "prompt",
                                 {
                                     "username": state.username,
-                                    "hostname": "honeypot",
+                                    "hostname": self._hostname,
                                     "cwd": state.cwd,
                                     "is_root": state.is_root,
                                 },
@@ -258,10 +254,11 @@ class SSHHoneypot(BaseEmulator):
                     elif char == "\x7f" or char == "\x08":
                         if buffer:
                             buffer = buffer[:-1]
-                            await self._send_response(writer, "\x08 \x08")
+                            await self._echo(writer, "\x08 \x08")
                     elif ord(char) >= 32:
-                        buffer += char
-                        await self._send_response(writer, char)
+                        if len(buffer) < self.MAX_COMMAND_LENGTH:
+                            buffer += char
+                            await self._echo(writer, char)
 
             except asyncio.TimeoutError:
                 await self._send_response(writer, "\r\nConnection timed out.\r\n")

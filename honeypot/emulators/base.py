@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class BaseEmulator(ABC):
-    def __init__(self, protocol: str, port: int):
+    def __init__(self, protocol: str, port: int, ssl_context=None):
         self.protocol = protocol
         self.port = port
+        self.ssl_context = ssl_context
         self._server: Optional[asyncio.AbstractServer] = None
         self._running = False
         self._connection_count = 0
@@ -33,7 +34,10 @@ class BaseEmulator(ABC):
 
     async def start(self):
         self._server = await asyncio.start_server(
-            self.handle_client, config.bind_address, self.port
+            self.handle_client,
+            config.bind_address,
+            self.port,
+            ssl=self.ssl_context,
         )
         self._running = True
         addr = self._server.sockets[0].getsockname()
@@ -58,9 +62,22 @@ class BaseEmulator(ABC):
     async def _send_response(
         self, writer: asyncio.StreamWriter, response: str
     ):
+        """Send a protocol response, with anti-fingerprinting jitter."""
         if response:
             await self._apply_response_delay()
             writer.write(response.encode())
+            await writer.drain()
+
+    async def _echo(self, writer: asyncio.StreamWriter, text: str):
+        """Echo typed input straight back with no jitter.
+
+        The response delay exists to hide the fact that answers are generated
+        rather than computed. Applying it per echoed character would add up to
+        half a second per keystroke, which is both unusable and itself a
+        fingerprint.
+        """
+        if text:
+            writer.write(text.encode())
             await writer.drain()
 
     async def _check_rate_limit(self, peer_ip: str) -> bool:

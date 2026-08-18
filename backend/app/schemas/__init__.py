@@ -51,6 +51,20 @@ class AlertStatusEnum(str, Enum):
     FALSE_POSITIVE = "false_positive"
 
 
+class MitreTechnique(BaseModel):
+    """A single mapped ATT&CK technique.
+
+    The pipeline stores technique objects, but the response models declared
+    List[str], so every session carrying a technique failed response
+    validation with a 500.
+    """
+
+    id: str
+    name: str
+    source: Optional[str] = None
+    confidence: Optional[float] = None
+
+
 class Token(BaseModel):
     access_token: str
     refresh_token: str
@@ -64,10 +78,24 @@ class TokenPayload(BaseModel):
 
 
 class UserCreate(BaseModel):
+    """Self-service registration payload.
+
+    Deliberately has no `role` field: it used to accept one, so anyone could
+    register themselves as an administrator. Roles are assigned by an admin
+    through the user-management endpoint.
+    """
+
     email: EmailStr
-    password: str = Field(..., min_length=8)
-    name: Optional[str] = None
+    password: str = Field(..., min_length=12, max_length=128)
+    name: Optional[str] = Field(None, max_length=255)
+
+
+class AdminUserCreate(UserCreate):
     role: UserRole = UserRole.ANALYST
+
+
+class UserRoleUpdate(BaseModel):
+    role: UserRole
 
 
 class UserLogin(BaseModel):
@@ -107,7 +135,7 @@ class PasswordResetRequest(BaseModel):
 class PasswordResetConfirm(BaseModel):
     email: EmailStr
     otp_code: str = Field(..., min_length=6, max_length=6)
-    new_password: str = Field(..., min_length=8)
+    new_password: str = Field(..., min_length=12, max_length=128)
 
 
 class RegisterResponse(BaseModel):
@@ -118,7 +146,7 @@ class RegisterResponse(BaseModel):
 
 class PasswordChange(BaseModel):
     current_password: str
-    new_password: str = Field(..., min_length=8)
+    new_password: str = Field(..., min_length=12, max_length=128)
 
 
 class HoneypotNodeCreate(BaseModel):
@@ -166,6 +194,7 @@ class HoneypotSessionResponse(BaseModel):
     id: int
     session_uuid: str
     node_id: int
+    protocol: Optional[str] = None
     attacker_ip: str
     attacker_port: Optional[int]
     geo: Optional[GeoInfo] = None
@@ -178,10 +207,11 @@ class HoneypotSessionResponse(BaseModel):
     attacker_profile: Optional[AttackerProfile]
     anomaly_score: Optional[float]
     is_anomalous: bool
+    command_count: int = 0
     detected_tools: Optional[List[str]]
     detected_intents: Optional[List[str]]
     mitre_tactics: Optional[List[str]]
-    mitre_techniques: Optional[List[str]]
+    mitre_techniques: Optional[List[MitreTechnique]]
     uploaded_files: Optional[List[str]]
     created_at: datetime
 
@@ -189,11 +219,12 @@ class HoneypotSessionResponse(BaseModel):
         from_attributes = True
 
     @classmethod
-    def from_orm(cls, obj):
+    def from_model(cls, obj):
         return cls(
             id=obj.id,
             session_uuid=obj.session_uuid,
             node_id=obj.node_id,
+            protocol=obj.protocol,
             attacker_ip=obj.attacker_ip,
             attacker_port=obj.attacker_port,
             geo=GeoInfo(
@@ -212,6 +243,7 @@ class HoneypotSessionResponse(BaseModel):
             attacker_profile=obj.attacker_profile,
             anomaly_score=obj.anomaly_score,
             is_anomalous=obj.is_anomalous,
+            command_count=obj.command_count or 0,
             detected_tools=obj.detected_tools or [],
             detected_intents=obj.detected_intents or [],
             mitre_tactics=obj.mitre_tactics or [],
@@ -251,7 +283,7 @@ class AlertResponse(BaseModel):
     assigned_to_id: Optional[int]
     auto_generated: bool
     mitre_tactics: Optional[List[str]]
-    mitre_techniques: Optional[List[str]]
+    mitre_techniques: Optional[List[MitreTechnique]]
     created_at: datetime
     updated_at: Optional[datetime]
 
@@ -301,9 +333,12 @@ class DashboardStats(BaseModel):
 
 
 class LiveSessionEvent(BaseModel):
+    session_id: int
     session_uuid: str
+    protocol: Optional[str] = None
     attacker_ip: str
     geo_country: Optional[str]
+    geo_country_name: Optional[str] = None
     geo_lat: Optional[float]
     geo_lon: Optional[float]
     attack_category: Optional[str]
@@ -347,6 +382,10 @@ class ExportFormat(str, Enum):
     JSON = "json"
     CEF = "cef"
     STIX = "stix"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 class ExportRequest(BaseModel):

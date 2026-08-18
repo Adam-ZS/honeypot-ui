@@ -1,134 +1,228 @@
+"""Container isolation verification for the honeypot engine.
+
+This module *verifies and reports* the isolation the deployment provides. It
+deliberately does not claim to enforce anything: the real controls live in the
+container runtime (``cap_drop``, ``read_only``, ``no-new-privileges``, an
+``internal`` Docker network), and Python running inside the sandbox cannot
+tighten its own sandbox. An earlier version logged "breakout prevention
+measures enforced" while its enforcement methods only wrote log lines, and
+several checks returned ``True`` unconditionally, so the dashboard reported a
+secure posture regardless of how the engine was actually deployed.
+"""
+
+from __future__ import annotations
+
 import logging
 import os
 import subprocess
-from typing import Optional
 
 from honeypot.core.config import config
 
 logger = logging.getLogger(__name__)
 
 
+class IsolationReport:
+    """Result of one isolation sweep."""
+
+    def __init__(self, checks: dict[str, bool], warnings: list[str]):
+        self.checks = checks
+        self.warnings = warnings
+
+    @property
+    def secure(self) -> bool:
+        return all(self.checks.values())
+
+    def to_dict(self) -> dict:
+        return {
+            **self.checks,
+            "overall_secure": self.secure,
+            "warnings": self.warnings,
+        }
+
+
 class BreakoutPrevention:
     def __init__(self):
         self._isolation_enabled = config.enable_isolation
         self._network_name = config.docker_network
-        self._security_checks: list[dict] = []
+        self._reports: list[IsolationReport] = []
 
     def verify_isolation(self) -> dict:
+        """Run every isolation check and record the result."""
+        warnings: list[str] = []
+
+        if not self._isolation_enabled:
+            report = IsolationReport(
+                {
+                    "network_segmentation": False,
+                    "egress_allowlist_configured": False,
+                    "container_isolation": False,
+                    "read_only_rootfs": False,
+                    "privilege_restriction": False,
+                },
+                ["Isolation is disabled via HONEYPOT_ENABLE_ISOLATION"],
+            )
+            self._reports.append(report)
+            return report.to_dict()
+
         checks = {
-            "isolation_enabled": self._isolation_enabled,
-            "docker_network": self._network_name,
-            "network_segmentation": False,
-            "egress_filtering": False,
-            "container_isolation": False,
-            "filesystem_isolation": False,
-            "process_isolation": False,
-            "overall_secure": False,
+            "network_segmentation": self._check_network_segmentation(warnings),
+            "egress_allowlist_configured": self._check_egress_allowlist(warnings),
+            "container_isolation": self._check_container_isolation(warnings),
+            "read_only_rootfs": self._check_read_only_rootfs(warnings),
+            "privilege_restriction": self._check_privilege_restriction(warnings),
         }
 
-        if not self._isolation_enabled:
-            checks["overall_secure"] = False
-            self._security_checks.append(checks)
-            return checks
+        report = IsolationReport(checks, warnings)
+        self._reports.append(report)
 
-        checks["network_segmentation"] = self._check_network_segmentation()
-        checks["egress_filtering"] = self._check_egress_filtering()
-        checks["container_isolation"] = self._check_container_isolation()
-        checks["filesystem_isolation"] = self._check_filesystem_isolation()
-        checks["process_isolation"] = self._check_process_isolation()
+        if not report.secure:
+            failed = [name for name, ok in checks.items() if not ok]
+            logger.warning(
+                "Isolation verification FAILED for: %s. The engine will keep "
+                "running, but it is not safely contained.",
+                ", ".join(failed),
+            )
+        else:
+            logger.info("Isolation verification passed all checks")
 
-        checks["overall_secure"] = all([
-            checks["network_segmentation"],
-            checks["egress_filtering"],
-            checks["container_isolation"],
-            checks["filesystem_isolation"],
-            checks["process_isolation"],
-        ])
+        return report.to_dict()
 
-        self._security_checks.append(checks)
-        return checks
-
-    def _check_network_segmentation(self) -> bool:
+    def _check_network_segmentation(self, warnings: list[str]) -> bool:
+        """The engine must sit on an internal-only Docker network."""
         try:
             result = subprocess.run(
-                ["docker", "network", "inspect", self._network_name],
-                capture_output=True, text=True, timeout=10
+                [
+                    "docker",
+                    "network",
+                    "inspect",
+                    self._network_name,
+                    "--format",
+                    "{{.Internal}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # No Docker socket inside the container is the expected, correct
+            # state. Fall back to checking that no default route leaves the
+            # container towards the public internet.
+            return self._check_no_default_route(warnings)
+
+        if result.returncode != 0:
+            warnings.append(
+                f"Docker network {self._network_name!r} not found"
+            )
+            return False
+        if result.stdout.strip().lower() != "true":
+            warnings.append(
+                f"Docker network {self._network_name!r} is not marked internal"
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _check_no_default_route(warnings: list[str]) -> bool:
+        try:
+            with open("/proc/net/route", "r", encoding="utf-8") as fh:
+                lines = fh.read().splitlines()[1:]
+        except OSError:
+            warnings.append("Could not read /proc/net/route to verify egress")
             return False
 
-    def _check_egress_filtering(self) -> bool:
+        for line in lines:
+            fields = line.split()
+            # Destination 00000000 is the default route.
+            if len(fields) > 1 and fields[1] == "00000000":
+                warnings.append(
+                    "Container has a default route; it is not on an "
+                    "internal-only network"
+                )
+                return False
+        return True
+
+    @staticmethod
+    def _check_egress_allowlist(warnings: list[str]) -> bool:
         from honeypot.security.egress_filter import egress_filter
-        return len(egress_filter._allowed_hosts) > 0
 
-    def _check_container_isolation(self) -> bool:
-        checks = [
-            os.environ.get("HONEYPOT_CONTAINER") == "true",
-            os.path.exists("/.dockerenv"),
-            os.environ.get("container") is not None,
-        ]
-        return any(checks)
-
-    def _check_filesystem_isolation(self) -> bool:
-        protected_paths = ["/etc/shadow", "/etc/passwd"]
-        for path in protected_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path, "r") as f:
-                        content = f.read()
-                    if "honeypot" in content.lower():
-                        return True
-                except (PermissionError, IOError):
-                    return True
+        if not egress_filter.allowed_hosts:
+            warnings.append("Egress allowlist is empty")
+            return False
         return True
 
-    def _check_process_isolation(self) -> bool:
+    @staticmethod
+    def _check_container_isolation(warnings: list[str]) -> bool:
+        containerised = (
+            os.environ.get("HONEYPOT_CONTAINER") == "true"
+            or os.path.exists("/.dockerenv")
+            or os.environ.get("container") is not None
+        )
+        if not containerised:
+            warnings.append(
+                "Engine does not appear to be running inside a container"
+            )
+        return containerised
+
+    @staticmethod
+    def _check_read_only_rootfs(warnings: list[str]) -> bool:
+        """Confirm the root filesystem really is read-only.
+
+        The previous check read /etc/passwd and returned True on success *or*
+        failure, so it could never fail.
+        """
+        probe = "/.honeypot-write-probe"
         try:
-            with open("/proc/1/cmdline", "r") as f:
-                cmdline = f.read()
-            if any(
-                proc in cmdline
-                for proc in ["init", "systemd", "docker", "containerd"]
-            ):
-                return True
-        except (FileNotFoundError, IOError, PermissionError):
+            with open(probe, "w", encoding="utf-8") as fh:
+                fh.write("probe")
+        except OSError:
+            return True
+
+        try:
+            os.remove(probe)
+        except OSError:
             pass
-        return True
+        warnings.append("Root filesystem is writable (expected read_only: true)")
+        return False
 
-    def enforce_breakout_prevention(self):
-        if not self._isolation_enabled:
-            logger.warning("Isolation is disabled - breakout prevention not enforced")
-            return
+    @staticmethod
+    def _check_privilege_restriction(warnings: list[str]) -> bool:
+        """Confirm the process is not running with full root capabilities."""
+        if os.geteuid() != 0:
+            return True
 
-        logger.info("Enforcing breakout prevention measures")
+        try:
+            with open("/proc/self/status", "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("CapEff:"):
+                        effective = int(line.split()[1], 16)
+                        # A container started with `cap_drop: ALL` keeps at
+                        # most NET_BIND_SERVICE (bit 10).
+                        if effective & ~(1 << 10):
+                            warnings.append(
+                                "Process retains Linux capabilities beyond "
+                                "NET_BIND_SERVICE"
+                            )
+                            return False
+                        return True
+        except (OSError, ValueError):
+            warnings.append("Could not read /proc/self/status capabilities")
+            return False
 
-        self._restrict_network_access()
-        self._restrict_filesystem_access()
-        self._restrict_process_access()
-
-        logger.info("Breakout prevention measures enforced")
-
-    def _restrict_network_access(self):
-        logger.info("Network restrictions: Docker network isolation active")
-
-    def _restrict_filesystem_access(self):
-        logger.info("Filesystem restrictions: Read-only critical paths enforced")
-
-    def _restrict_process_access(self):
-        logger.info("Process restrictions: Namespace isolation active")
+        warnings.append("Running as uid 0 with unknown capabilities")
+        return False
 
     def get_security_status(self) -> dict:
-        latest = self._security_checks[-1] if self._security_checks else {}
+        latest = self._reports[-1].to_dict() if self._reports else {}
         return {
             "isolation_enabled": self._isolation_enabled,
             "network_name": self._network_name,
-            "total_checks": len(self._security_checks),
+            "total_checks": len(self._reports),
+            "overall_secure": bool(latest.get("overall_secure", False)),
             "last_check": latest,
         }
 
     def get_security_history(self) -> list[dict]:
-        return self._security_checks.copy()
+        return [report.to_dict() for report in self._reports]
 
 
 breakout_prevention = BreakoutPrevention()

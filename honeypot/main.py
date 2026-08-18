@@ -12,6 +12,7 @@ from honeypot.emulators.ftp import FTPHoneypot
 from honeypot.emulators.http import HTTPHoneypot
 from honeypot.adaptive.fingerprint import fingerprint_engine
 from honeypot.security.rate_limiter import rate_limiter
+from honeypot.core.control_api import build_control_api
 from honeypot.security.breakout import breakout_prevention
 
 logging.basicConfig(
@@ -27,6 +28,7 @@ class HoneypotService:
         self._ftp: Optional[FTPHoneypot] = None
         self._http: Optional[HTTPHoneypot] = None
         self._https: Optional[HTTPHoneypot] = None
+        self._control_api = None
         self._running = False
 
     async def start(self):
@@ -39,7 +41,23 @@ class HoneypotService:
         logger.info(f"Adaptive Response: {config.adaptive_response}")
         logger.info(f"Isolation: {config.enable_isolation}")
 
-        breakout_prevention.enforce_breakout_prevention()
+        if config.ingest_token == "honeypot-ingest-token-change-in-production":
+            logger.error(
+                "HONEYPOT_INGEST_TOKEN is still the default value. The backend "
+                "will reject ingest and the control API is effectively "
+                "unauthenticated. Set a unique token before exposing this host."
+            )
+
+        isolation = breakout_prevention.verify_isolation()
+        if not isolation["overall_secure"]:
+            logger.warning(
+                "Starting WITHOUT verified isolation. Failing checks: %s",
+                ", ".join(
+                    name
+                    for name, ok in isolation.items()
+                    if isinstance(ok, bool) and not ok
+                ),
+            )
 
         await rate_limiter.start()
 
@@ -71,6 +89,11 @@ class HoneypotService:
             except Exception as e:
                 logger.error(f"Failed to start {name} honeypot: {e}")
 
+        await session_manager.register_node()
+
+        self._control_api = build_control_api(self)
+        await self._control_api.start()
+
         self._running = True
         logger.info("All honeypot services started")
         logger.info(f"Active protocols: {[p.value for p in config.enabled_protocols]}")
@@ -88,6 +111,9 @@ class HoneypotService:
         if self._https:
             await self._https.stop()
 
+        if self._control_api:
+            await self._control_api.stop()
+
         await fingerprint_engine.stop_rotation()
         await rate_limiter.stop()
 
@@ -95,12 +121,15 @@ class HoneypotService:
         for session in active:
             await session_manager.end_session(session.session_id)
 
+        # Let in-flight ingests reach the backend before the loop closes.
+        await session_manager.drain()
+
         logger.info("All honeypot services stopped")
 
     async def run(self):
         await self.start()
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
         def signal_handler():
@@ -133,6 +162,7 @@ class HoneypotService:
             "total_sessions": total_sessions,
             "blocked_ips": len(blocked_ips),
             "isolation": isolation_status,
+            "node_id": session_manager.node_id,
             "anti_fingerprinting": config.enable_anti_fingerprinting,
             "adaptive_response": config.adaptive_response,
         }

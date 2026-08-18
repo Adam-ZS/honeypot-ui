@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ShieldAlert, Eye, EyeOff, AlertCircle, Mail } from 'lucide-react'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { api } from '../services/api'
 
 export default function Login() {
@@ -19,8 +19,7 @@ export default function Login() {
     const e = {}
     if (!form.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email))
       e.email = 'A valid email address is required.'
-    if (!form.password || form.password.length < 6)
-      e.password = 'Password must be at least 6 characters.'
+    if (!form.password) e.password = 'Enter your password.'
     return e
   }
 
@@ -182,7 +181,13 @@ export default function Login() {
             </button>
           </form>
 
-          <p className="mt-6 text-center text-xs text-gray-500 font-mono">
+          <p className="mt-4 text-center text-xs font-mono">
+            <Link to="/forgot-password" className="text-gray-500 hover:text-accent-cyan hover:underline">
+              Forgot your password?
+            </Link>
+          </p>
+
+          <p className="mt-3 text-center text-xs text-gray-500 font-mono">
             No account?{' '}
             <Link to="/signup" className="text-accent-cyan hover:underline">
               Request access

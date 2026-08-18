@@ -1,88 +1,117 @@
-import sys
-import traceback
+"""HoneySentinel AI backend application."""
 
-try:
-    from fastapi import FastAPI
-    from fastapi.middleware.cors import CORSMiddleware
-    from slowapi import Limiter
-    from slowapi.util import get_remote_address
-    from slowapi.errors import RateLimitExceeded
-    from fastapi.responses import JSONResponse
+import logging
+from contextlib import asynccontextmanager
 
-    from app.core.config import get_settings
-    from app.core.database import init_db
-    from app.api import router as api_router
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
-    settings = get_settings()
-    limiter = Limiter(key_func=get_remote_address)
+from app.api import router as api_router
+from app.core.config import get_settings
+from app.core.database import init_db
+from app.core.rate_limit import limiter
 
-    app = FastAPI(
-        title=settings.PROJECT_NAME,
-        version=settings.VERSION,
-        description="AI-Integrated Honeypot System - HoneySentinel",
-    )
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-        "https://honeypot-ui-psi.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*", "ngrok-skip-browser-warning"],
-    )
+settings = get_settings()
 
-    app.state.limiter = limiter
 
-    @app.exception_handler(RateLimitExceeded)
-    async def rate_limit_handler(request, exc):
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded. Please try again later."},
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run migrations and optional seeding before serving traffic.
+
+    Startup failures propagate. The previous version wrapped the whole module
+    in try/except and called sys.exit(1), which hid the real traceback and made
+    the process look like a clean exit to the platform supervisor.
+    """
+    logger.info("Starting %s v%s", settings.PROJECT_NAME, settings.VERSION)
+    if settings.RUN_MIGRATIONS_ON_STARTUP:
+        await init_db()
+    else:
+        logger.info(
+            "Skipping migrations (RUN_MIGRATIONS_ON_STARTUP=false); the "
+            "schema must already be at head."
         )
+    await _auto_seed()
+    logger.info("Startup complete")
+    yield
+    logger.info("Shutting down")
 
-    @app.on_event("startup")
-    async def startup():
-        try:
-            import os
-            if os.environ.get("SECRET_KEY", "") in ("", "super-secret-key-change-in-production"):
-                print(">>> SECURITY WARNING: SECRET_KEY is not set!", flush=True)
-            if os.environ.get("ENCRYPTION_KEY", "") in ("", "0123456789abcdef0123456789abcdef"):
-                print(">>> SECURITY WARNING: ENCRYPTION_KEY is not set!", flush=True)
-            if os.environ.get("HONEYPOT_INGEST_TOKEN", "") in ("", "honeypot-ingest-token-change-in-production"):
-                print(">>> SECURITY WARNING: HONEYPOT_INGEST_TOKEN is not set!", flush=True)
-            print(">>> startup: calling init_db", flush=True)
-            await init_db()
-            print(">>> startup: init_db done", flush=True)
-            await _auto_seed()
-            print(">>> startup: complete", flush=True)
-        except Exception as e:
-            print(f">>> STARTUP FAILED: {e}", flush=True)
-            traceback.print_exc()
-            sys.exit(1)
 
-    async def _auto_seed():
-        from app.models import User
-        from app.core.security import get_password_hash
-        from sqlalchemy import select
-        from app.core.database import async_session_factory
+async def _auto_seed():
+    """Seed demo data only when explicitly requested."""
+    if not settings.SEED_ON_STARTUP:
+        return
 
-        async with async_session_factory() as db:
-            result = await db.execute(select(User).where(User.email == "admin@honeysentinel.io"))
-            if not result.scalar_one_or_none():
-                from app.seed import seed_database
-                await seed_database()
+    from sqlalchemy import select
 
-    @app.get("/health")
-    @limiter.limit("10/minute")
-    async def health_check(request):
-        return {"status": "healthy", "version": settings.VERSION}
+    from app.core.database import async_session_factory
+    from app.models import User
 
-    app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+    async with async_session_factory() as db:
+        result = await db.execute(select(User).limit(1))
+        if result.scalar_one_or_none() is None:
+            from app.seed import seed_database
 
-except Exception as e:
-    print(f">>> IMPORT/INIT FAILED: {e}", flush=True)
-    traceback.print_exc()
-    sys.exit(1)
+            logger.info("Empty database detected; seeding demo dataset")
+            await seed_database()
+
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description="AI-Integrated Honeypot System - HoneySentinel",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "ngrok-skip-browser-warning"],
+)
+
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded. Please try again later."},
+    )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Baseline hardening headers on every API response."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Cache-Control", "no-store, no-cache, must-revalidate"
+    )
+    return response
+
+
+@app.get("/health")
+@limiter.limit("60/minute")
+async def health_check(request: Request):
+    # `request` must be annotated as Request: without the annotation FastAPI
+    # treated it as a required query parameter and /health returned 422.
+    return {"status": "healthy", "version": settings.VERSION}
+
+
+app.include_router(api_router, prefix=settings.API_V1_PREFIX)

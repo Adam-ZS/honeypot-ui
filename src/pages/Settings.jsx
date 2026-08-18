@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Shield, Bell, Globe, Mail, Webhook, Plus, Trash2, Save, RotateCcw, AlertTriangle, Settings as SettingsIcon, Moon, Sun, Activity } from 'lucide-react'
+import { Activity, AlertTriangle, Bell, Globe, Mail, Plus, RotateCcw, Save, Settings as SettingsIcon, Trash2, Webhook } from 'lucide-react'
 import { api } from '../services/api'
+import { useAuth } from '../context/useAuth'
+import ErrorBanner from '../components/ErrorBanner'
+import EmptyState from '../components/EmptyState'
 
 const SEVERITY_OPTIONS = [
   { value: 'low', label: 'Low' },
@@ -9,7 +12,7 @@ const SEVERITY_OPTIONS = [
   { value: 'critical', label: 'Critical' },
 ]
 
-function ThresholdCard({ threshold, onUpdate, onDelete }) {
+function ThresholdCard({ threshold, onUpdate, onDelete, canEdit }) {
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({
     name: threshold.name,
@@ -35,8 +38,8 @@ function ThresholdCard({ threshold, onUpdate, onDelete }) {
           <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${threshold.is_active ? 'bg-accent-green/10 text-accent-green border border-accent-green/30' : 'bg-gray-600/20 text-gray-500 border border-gray-600/30'}`}>
             {threshold.is_active ? 'ACTIVE' : 'DISABLED'}
           </span>
-          {!editing && (
-            <button onClick={() => setEditing(true)} className="text-xs font-mono text-accent-blue hover:text-blue-300">
+          {!editing && canEdit && (
+            <button type="button" onClick={() => setEditing(true)} className="text-xs font-mono text-accent-blue hover:text-blue-300">
               Edit
             </button>
           )}
@@ -77,7 +80,7 @@ function ThresholdCard({ threshold, onUpdate, onDelete }) {
                 min="0"
                 max="1"
                 value={form.anomaly_score_threshold}
-                onChange={e => setForm(f => ({ ...f, anomaly_score_threshold: parseFloat(e.target.value) }))}
+                onChange={e => setForm(f => ({ ...f, anomaly_score_threshold: Number.isFinite(parseFloat(e.target.value)) ? parseFloat(e.target.value) : 0 }))}
                 className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
               />
             </div>
@@ -117,7 +120,17 @@ function ThresholdCard({ threshold, onUpdate, onDelete }) {
               <Save className="w-3.5 h-3.5" /> Save
             </button>
             <button
-              onClick={() => { setForm(threshold); setEditing(false) }}
+              type="button"
+              onClick={() => {
+                setForm({
+                  name: threshold.name,
+                  min_severity: threshold.min_severity,
+                  anomaly_score_threshold: threshold.anomaly_score_threshold,
+                  email_enabled: threshold.email_enabled,
+                  webhook_enabled: threshold.webhook_enabled,
+                })
+                setEditing(false)
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono text-gray-400 hover:text-white transition-colors"
             >
               <RotateCcw className="w-3.5 h-3.5" /> Cancel
@@ -146,12 +159,13 @@ function ThresholdCard({ threshold, onUpdate, onDelete }) {
               {threshold.webhook_enabled ? 'Enabled' : 'Disabled'}
             </span>
           </div>
-          <button
+          {canEdit && <button
+            type="button"
             onClick={() => onDelete(threshold.id)}
             className="mt-2 flex items-center gap-1.5 text-xs font-mono text-accent-red hover:text-red-400 transition-colors"
           >
             <Trash2 className="w-3.5 h-3.5" /> Delete
-          </button>
+          </button>}
         </div>
       )}
     </div>
@@ -159,6 +173,9 @@ function ThresholdCard({ threshold, onUpdate, onDelete }) {
 }
 
 export default function Settings() {
+  const { hasRole } = useAuth()
+  const isAdmin = hasRole('admin')
+  const [error, setError] = useState(null)
   const [thresholds, setThresholds] = useState([])
   const [systemConfig, setSystemConfig] = useState(null)
   const [honeypotMode, setHoneypotMode] = useState('active')
@@ -182,44 +199,55 @@ export default function Settings() {
       setThresholds(thresholdsData || [])
       setSystemConfig(configData)
       setHoneypotMode(configData?.honeypot_mode || 'active')
+      setError(null)
     } catch (err) {
-      console.error('Settings fetch error:', err)
+      setError(err.message)
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    fetchData()
+    // Deferred so no state update happens synchronously in the effect body.
+    const timer = setTimeout(fetchData, 0)
+    return () => clearTimeout(timer)
   }, [fetchData])
 
-  const handleUpdateThreshold = async (id, data) => {
-    await api.settings.updateThreshold(id, data)
-    fetchData()
+  const run = async (action) => {
+    try {
+      await action()
+      setError(null)
+      await fetchData()
+      return true
+    } catch (err) {
+      setError(err.message)
+      return false
+    }
   }
 
-  const handleDeleteThreshold = async (id) => {
-    await api.settings.deleteThreshold(id)
-    fetchData()
+  const handleUpdateThreshold = (id, data) =>
+    run(() => api.settings.updateThreshold(id, data))
+
+  const handleDeleteThreshold = (id) => {
+    // Deleting a threshold silently stops alert delivery, so confirm first.
+    if (!window.confirm('Delete this alert threshold? Notifications matching it will stop.')) {
+      return Promise.resolve(false)
+    }
+    return run(() => api.settings.deleteThreshold(id))
   }
 
   const handleCreateThreshold = async () => {
     if (!newThreshold.name.trim()) return
-    await api.settings.createThreshold(newThreshold)
+    const ok = await run(() => api.settings.createThreshold(newThreshold))
+    if (!ok) return
     setNewThreshold({ name: '', min_severity: 'medium', anomaly_score_threshold: 0.7, email_enabled: true, webhook_enabled: false })
     setShowNewThreshold(false)
-    fetchData()
   }
 
   const handleUpdateMode = async () => {
     setSaving(true)
-    try {
-      await api.settings.updateSystemConfig({ honeypot_mode: honeypotMode })
-    } catch (err) {
-      console.error('Mode update error:', err)
-    } finally {
-      setSaving(false)
-    }
+    await run(() => api.settings.updateSystemConfig({ honeypot_mode: honeypotMode }))
+    setSaving(false)
   }
 
   if (loading) {
@@ -235,6 +263,17 @@ export default function Settings() {
 
   return (
     <div className="space-y-6 animate-fade-in max-w-5xl">
+      {error && <ErrorBanner message={error} onRetry={fetchData} />}
+
+      {!isAdmin && (
+        <div className="bg-surface-800 border border-border rounded-xl px-4 py-3">
+          <p className="text-xs font-mono text-gray-400">
+            You have read-only access. Changing the emulation mode or alert
+            thresholds requires an administrator account.
+          </p>
+        </div>
+      )}
+
       <div className="bg-surface-800 border border-border rounded-xl p-6">
         <div className="flex items-center gap-2 mb-6">
           <SettingsIcon className="w-5 h-5 text-accent-cyan" />
@@ -255,6 +294,8 @@ export default function Settings() {
               ].map(mode => (
                 <button
                   key={mode.value}
+                  type="button"
+                  disabled={!isAdmin}
                   onClick={() => setHoneypotMode(mode.value)}
                   className={`flex-1 p-4 rounded-xl border transition-all text-left ${
                     honeypotMode === mode.value
@@ -272,7 +313,7 @@ export default function Settings() {
             </div>
             <button
               onClick={handleUpdateMode}
-              disabled={saving}
+              disabled={saving || !isAdmin}
               className="mt-3 flex items-center gap-1.5 px-4 py-2 text-xs font-mono bg-accent-blue text-surface-900 rounded-lg hover:bg-blue-400 disabled:opacity-50 transition-all"
             >
               <Save className="w-3.5 h-3.5" />
@@ -287,11 +328,11 @@ export default function Settings() {
             <div className="bg-surface-700 border border-border rounded-xl p-4 space-y-2">
               <div className="flex justify-between text-xs">
                 <span className="font-mono text-gray-500">Total Nodes</span>
-                <span className="font-mono text-white">{systemConfig?.active_nodes || 4}</span>
+                <span className="font-mono text-white">{systemConfig?.active_nodes ?? 0}</span>
               </div>
               <div className="flex justify-between text-xs">
                 <span className="font-mono text-gray-500">Protocols</span>
-                <span className="font-mono text-white">{(systemConfig?.protocols || ['ssh', 'http', 'ftp']).join(', ')}</span>
+                <span className="font-mono text-white">{systemConfig?.protocols?.length ? systemConfig.protocols.join(', ') : 'None registered'}</span>
               </div>
               <div className="flex justify-between text-xs">
                 <span className="font-mono text-gray-500">Current Mode</span>
@@ -311,6 +352,8 @@ export default function Settings() {
             </h2>
           </div>
           <button
+            type="button"
+            disabled={!isAdmin}
             onClick={() => setShowNewThreshold(!showNewThreshold)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono bg-surface-600 border border-border rounded-lg text-gray-300 hover:text-white transition-colors"
           >
@@ -353,7 +396,7 @@ export default function Settings() {
                   min="0"
                   max="1"
                   value={newThreshold.anomaly_score_threshold}
-                  onChange={e => setNewThreshold(f => ({ ...f, anomaly_score_threshold: parseFloat(e.target.value) }))}
+                  onChange={e => setNewThreshold(f => ({ ...f, anomaly_score_threshold: Number.isFinite(parseFloat(e.target.value)) ? parseFloat(e.target.value) : 0 }))}
                   className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
                 />
               </div>
@@ -405,6 +448,7 @@ export default function Settings() {
             {thresholds.map(t => (
               <ThresholdCard
                 key={t.id}
+                canEdit={isAdmin}
                 threshold={t}
                 onUpdate={handleUpdateThreshold}
                 onDelete={handleDeleteThreshold}
@@ -412,11 +456,11 @@ export default function Settings() {
             ))}
           </div>
         ) : (
-          <div className="text-center py-8">
-            <Bell className="w-8 h-8 text-gray-600 mx-auto mb-3" />
-            <p className="font-mono text-sm text-gray-500">No alert thresholds configured</p>
-            <p className="font-mono text-xs text-gray-600 mt-1">Create one to start receiving notifications</p>
-          </div>
+          <EmptyState
+            icon={Bell}
+            title="No alert thresholds configured"
+            hint="Create one to start receiving notifications."
+          />
         )}
       </div>
 
@@ -437,8 +481,8 @@ export default function Settings() {
             <span className="text-white">JSON, CEF, STIX/TAXII</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-500">SIEM Compatible</span>
-            <span className="text-accent-green">Yes</span>
+            <span className="text-gray-500">SIEM Formats</span>
+            <span className="text-white">CEF and STIX 2.1 bundles</span>
           </div>
         </div>
       </div>

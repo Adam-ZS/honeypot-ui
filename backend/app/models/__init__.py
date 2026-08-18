@@ -70,7 +70,9 @@ class User(Base):
 
     alerts = relationship("Alert", back_populates="user", foreign_keys="Alert.assigned_to_id")
     audit_logs = relationship("AuditLog", back_populates="user")
-    otp_verifications = relationship("OTPVerification", back_populates="user")
+    otp_verifications = relationship(
+        "OTPVerification", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class HoneypotNode(Base):
@@ -88,7 +90,9 @@ class HoneypotNode(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_heartbeat = Column(DateTime(timezone=True), nullable=True)
 
-    sessions = relationship("HoneypotSession", back_populates="node")
+    sessions = relationship(
+        "HoneypotSession", back_populates="node", cascade="all, delete-orphan"
+    )
 
 
 class HoneypotSession(Base):
@@ -97,6 +101,9 @@ class HoneypotSession(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_uuid = Column(String(36), default=lambda: str(uuid.uuid4()), unique=True, index=True)
     node_id = Column(Integer, ForeignKey("honeypot_nodes.id"), nullable=False)
+    #: Protocol the session was captured on. The engine reports this, but it
+    #: was previously discarded and every export claimed "ssh".
+    protocol = Column(String(20), nullable=True)
     attacker_ip = Column(String(45), nullable=False, index=True)
     attacker_port = Column(Integer, nullable=True)
     geo_country = Column(String(3), nullable=True)
@@ -120,9 +127,12 @@ class HoneypotSession(Base):
     detected_tools = Column(JSON, nullable=True)
     detected_intents = Column(JSON, nullable=True)
     command_summary = Column(Text, nullable=True)
+    command_count = Column(Integer, default=0, nullable=False)
 
     # MITRE ATT&CK
+    #: List of tactic id strings, e.g. ["TA0001"].
     mitre_tactics = Column(JSON, nullable=True)
+    #: List of technique objects, e.g. [{"id": "T1110", "name": "Brute Force"}].
     mitre_techniques = Column(JSON, nullable=True)
 
     # Raw data (encrypted)
@@ -136,8 +146,14 @@ class HoneypotSession(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     node = relationship("HoneypotNode", back_populates="sessions")
-    alerts = relationship("Alert", back_populates="session")
-    iocs = relationship("IndicatorOfCompromise", back_populates="session")
+    alerts = relationship(
+        "Alert", back_populates="session", cascade="all, delete-orphan"
+    )
+    iocs = relationship(
+        "IndicatorOfCompromise",
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
 
 
 class IndicatorOfCompromise(Base):
@@ -212,7 +228,9 @@ class OTPVerification(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     email = Column(String(255), nullable=False, index=True)
-    otp_code = Column(String(6), nullable=False)
+    # HMAC-SHA256 hex digest of the code, never the code itself.
+    otp_code = Column(String(64), nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
     purpose = Column(String(50), nullable=False, default="email_verification")
     is_used = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

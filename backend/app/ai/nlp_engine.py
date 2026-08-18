@@ -1,9 +1,14 @@
 from __future__ import annotations
+import logging
+import math
 import re
+from collections import Counter
+
 import spacy
 from typing import List, Dict, Optional, Set
 from app.core.config import get_settings
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 OFFENSIVE_TOOLS = {
@@ -44,24 +49,45 @@ ATTACK_INTENTS = {
 
 
 class NLPEngine:
+    MAX_ANALYSIS_CHARS = 100_000
+
     def __init__(self):
         self.nlp: Optional[spacy.language.Language] = None
         self._loaded = False
 
     def _ensure_loaded(self):
+        """Load the spaCy model once, tolerating its absence.
+
+        Downloading a model at request time (the previous behaviour) needs
+        network access and write permission inside the container, and blocks
+        the event loop for tens of seconds. Install it at build time instead;
+        if it is missing we degrade to regex-only analysis rather than failing
+        the whole ingest.
+        """
         if self._loaded:
             return
         try:
             self.nlp = spacy.load(settings.SPACY_MODEL)
-            self._loaded = True
-        except OSError:
-            import subprocess
-            subprocess.run(["python3", "-m", "spacy", "download", settings.SPACY_MODEL], check=True)
-            self.nlp = spacy.load(settings.SPACY_MODEL)
-            self._loaded = True
+        except (OSError, IOError):
+            logger.warning(
+                "spaCy model %r unavailable; named-entity extraction disabled. "
+                "Install it with: python -m spacy download %s",
+                settings.SPACY_MODEL,
+                settings.SPACY_MODEL,
+            )
+            self.nlp = None
+        self._loaded = True
 
-    def _load_model(self):
+    def _entities(self, text: str) -> List[tuple]:
         self._ensure_loaded()
+        if self.nlp is None or not text:
+            return []
+        # spaCy's default max_length is 1_000_000 chars; attacker-controlled
+        # input should never get near it.
+        return [
+            (ent.text, ent.label_)
+            for ent in self.nlp(text[: self.MAX_ANALYSIS_CHARS]).ents
+        ]
 
     def analyze_commands(self, commands: List[str]) -> Dict:
         detected_tools: List[Dict] = []
@@ -69,7 +95,7 @@ class NLPEngine:
         tool_names: Set[str] = set()
         categories: Set[str] = set()
 
-        full_text = " ".join(commands).lower()
+        full_text = " ".join(commands).lower()[: self.MAX_ANALYSIS_CHARS]
 
         for tool_name, tool_info in OFFENSIVE_TOOLS.items():
             if re.search(tool_info["pattern"], full_text):
@@ -87,8 +113,7 @@ class NLPEngine:
                     detected_intents.add(intent)
                     break
 
-        doc = self.nlp(full_text)
-        entities = [(ent.text, ent.label_) for ent in doc.ents]
+        entities = self._entities(full_text)
 
         ip_pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
         ips = re.findall(ip_pattern, full_text)
@@ -115,7 +140,8 @@ class NLPEngine:
         }
 
     def analyze_payload(self, payload: str) -> Dict:
-        doc = self.nlp(payload.lower())
+        payload = payload[: self.MAX_ANALYSIS_CHARS]
+        lowered = payload.lower()
         results = {
             "is_suspicious": False,
             "suspicion_score": 0.0,
@@ -124,7 +150,7 @@ class NLPEngine:
         }
 
         for tool_name, tool_info in OFFENSIVE_TOOLS.items():
-            if re.search(tool_info["pattern"], payload.lower()):
+            if re.search(tool_info["pattern"], lowered):
                 results["detected_patterns"].append({
                     "tool": tool_name,
                     "category": tool_info["category"],
@@ -137,7 +163,7 @@ class NLPEngine:
             "injection", "traversal", "bypass", "encode", "decode",
         ]
         for keyword in suspicious_keywords:
-            if keyword in payload.lower():
+            if keyword in lowered:
                 results["detected_patterns"].append({"keyword": keyword})
                 results["suspicion_score"] += 0.1
 
@@ -172,14 +198,14 @@ class NLPEngine:
 
     @staticmethod
     def _shannon_entropy(text: str) -> float:
-        import numpy as np
         if not text:
             return 0.0
-        freq = {}
-        for c in text:
-            freq[c] = freq.get(c, 0) + 1
+        counts = Counter(text)
         length = len(text)
-        return -sum((count / length) * np.log2(count / length) for count in freq.values())
+        return -sum(
+            (count / length) * math.log2(count / length)
+            for count in counts.values()
+        )
 
 
 nlp_engine = NLPEngine()

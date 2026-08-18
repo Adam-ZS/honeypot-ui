@@ -1,9 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
 echo "Stopping HoneySentinel..."
-
-pkill -f "ngrok http" 2>/dev/null
-
-cd /home/meowman/Desktop/honeypot-ui
 docker compose down
 
-echo "HoneySentinel stopped."
+echo "HoneySentinel stopped. Captured data is preserved in the honeypot_data volume."
+echo "To remove it as well: docker compose down -v"

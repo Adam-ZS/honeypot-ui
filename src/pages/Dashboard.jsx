@@ -1,60 +1,36 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Shield, AlertTriangle, Activity, Globe, ArrowUpRight, Wifi, Terminal, Server, Lock } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import {
+  Activity, AlertTriangle, ArrowUpRight, Globe, Lock, Server, Shield, Terminal, WifiOff,
+} from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { api } from '../services/api'
+import EmptyState from '../components/EmptyState'
+import ErrorBanner from '../components/ErrorBanner'
 
-const SEVERITY_COLORS = {
-  Critical: 'bg-accent-red/10 text-accent-red border-accent-red/30',
-  High:     'bg-accent-orange/10 text-accent-orange border-accent-orange/30',
-  Medium:   'bg-yellow-500/10 text-yellow-400 border-yellow-500/30',
-  Low:      'bg-accent-green/10 text-accent-green border-accent-green/30',
+const SEVERITY_STYLES = {
+  critical: 'bg-accent-red/10 text-accent-red border-accent-red/30',
+  high: 'bg-accent-orange/10 text-accent-orange border-accent-orange/30',
+  medium: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30',
+  low: 'bg-accent-green/10 text-accent-green border-accent-green/30',
 }
 
-function GeoMapPlaceholder() {
-  return (
-    <div className="relative w-full h-full min-h-[300px] bg-surface-900 rounded-lg border border-border overflow-hidden flex items-center justify-center">
-      <div
-        className="absolute inset-0 opacity-30"
-        style={{
-          backgroundImage: `radial-gradient(circle at 20% 50%, rgba(57,208,216,0.08) 0%, transparent 50%),
-                            radial-gradient(circle at 80% 20%, rgba(248,81,73,0.08) 0%, transparent 40%),
-                            radial-gradient(circle at 60% 80%, rgba(88,166,255,0.06) 0%, transparent 40%)`,
-        }}
-      />
-      <div className="absolute inset-0 grid-bg opacity-40" />
-
-      {[
-        { top: '28%', left: '18%', color: '#f85149', size: 'w-2.5 h-2.5' },
-        { top: '35%', left: '72%', color: '#f85149', size: 'w-3 h-3' },
-        { top: '22%', left: '54%', color: '#e3692a', size: 'w-2 h-2' },
-        { top: '60%', left: '85%', color: '#58a6ff', size: 'w-2 h-2' },
-        { top: '45%', left: '30%', color: '#f85149', size: 'w-2.5 h-2.5' },
-        { top: '55%', left: '60%', color: '#e3692a', size: 'w-2 h-2' },
-        { top: '18%', left: '42%', color: '#3fb950', size: 'w-2 h-2' },
-      ].map((dot, i) => (
-        <div
-          key={i}
-          className={`absolute ${dot.size} rounded-full animate-pulse-slow`}
-          style={{
-            top: dot.top,
-            left: dot.left,
-            backgroundColor: dot.color,
-            boxShadow: `0 0 8px ${dot.color}`,
-            animationDelay: `${i * 0.4}s`,
-          }}
-        />
-      ))}
-
-      <div className="relative z-10 flex flex-col items-center gap-3 text-center">
-        <div className="flex items-center gap-2 bg-surface-700/80 border border-border rounded-lg px-4 py-2 backdrop-blur-sm">
-          <Wifi className="w-4 h-4 text-accent-cyan animate-pulse" />
-          <span className="font-mono text-xs text-gray-300 tracking-wider">
-            Live threat visualization — see Map tab
-          </span>
-        </div>
-      </div>
-    </div>
-  )
+const CATEGORY_LABELS = {
+  exploitation: 'Exploitation',
+  reconnaissance: 'Reconnaissance',
+  exfiltration: 'Exfiltration',
+  benign: 'Benign',
+  unknown: 'Unclassified',
 }
+
+const CATEGORY_COLORS = {
+  exploitation: 'bg-accent-red',
+  reconnaissance: 'bg-accent-blue',
+  exfiltration: 'bg-accent-orange',
+  benign: 'bg-accent-green',
+  unknown: 'bg-gray-600',
+}
+
+const REFRESH_MS = 15000
 
 function LoadingSkeleton() {
   return (
@@ -64,9 +40,114 @@ function LoadingSkeleton() {
           <div key={i} className="bg-surface-800 border border-border rounded-xl p-5 h-32" />
         ))}
       </div>
-      <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
-        <div className="xl:col-span-3 bg-surface-800 border border-border rounded-xl h-80" />
-        <div className="xl:col-span-2 bg-surface-800 border border-border rounded-xl h-80" />
+      <div className="bg-surface-800 border border-border rounded-xl h-80" />
+    </div>
+  )
+}
+
+function StatCard({ label, value, detail, icon: Icon, color, border }) {
+  return (
+    <div className={`bg-surface-800 border ${border} rounded-xl p-5 transition-all hover:bg-surface-700`}>
+      <div className="flex items-start justify-between mb-4">
+        <p className="text-xs font-mono text-gray-400 uppercase tracking-widest">{label}</p>
+        <div className="p-1.5 rounded-lg bg-surface-600">
+          <Icon className={`w-4 h-4 ${color}`} />
+        </div>
+      </div>
+      <p className={`text-3xl font-mono font-bold ${color}`}>{value.toLocaleString()}</p>
+      <p className="mt-2 text-xs font-mono text-gray-500 flex items-center gap-1">
+        <ArrowUpRight className="w-3 h-3" />
+        {detail}
+      </p>
+    </div>
+  )
+}
+
+function EngineOffline({ detail }) {
+  return (
+    <div className="bg-surface-800 border border-accent-orange/30 rounded-xl p-5">
+      <div className="flex items-center gap-2 mb-1">
+        <WifiOff className="w-4 h-4 text-accent-orange" />
+        <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
+          Honeypot Engine Unreachable
+        </h2>
+      </div>
+      <p className="text-xs font-mono text-gray-500">
+        {detail || 'The backend could not contact the honeypot engine.'} Live
+        emulation status, blocked IPs and isolation checks are unavailable
+        until it reconnects.
+      </p>
+    </div>
+  )
+}
+
+function EngineStatus({ status }) {
+  const isolationChecked = status.isolation && Object.keys(status.isolation).length > 0
+  const tiles = [
+    { icon: Terminal, tint: 'text-accent-cyan', label: 'Mode', value: status.mode ?? 'unknown' },
+    { icon: Activity, tint: 'text-accent-orange', label: 'Active', value: `${status.active_sessions} sessions` },
+    { icon: Server, tint: 'text-accent-blue', label: 'Blocked IPs', value: status.blocked_ips },
+    {
+      icon: Lock,
+      tint: status.isolation?.overall_secure ? 'text-accent-green' : 'text-accent-orange',
+      label: 'Isolation',
+      // Report "unverified" rather than claiming a warning when the engine
+      // has not run its isolation checks yet.
+      value: isolationChecked
+        ? (status.isolation.overall_secure ? 'Verified' : 'Failing')
+        : 'Unverified',
+    },
+  ]
+
+  return (
+    <div className="bg-surface-800 border border-border rounded-xl p-5">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
+            Honeypot Engine Status
+          </h2>
+          <p className="text-xs font-mono text-gray-500 mt-0.5">
+            Emulation services &amp; security posture
+          </p>
+        </div>
+        <span className={`flex items-center gap-1.5 text-xs font-mono ${status.running ? 'text-accent-green' : 'text-accent-red'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${status.running ? 'bg-accent-green' : 'bg-accent-red'}`} />
+          {status.running ? 'Running' : 'Stopped'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {tiles.map(({ icon: Icon, tint, label, value }) => (
+          <div key={label} className="bg-surface-700 rounded-lg p-3 border border-border/50">
+            <div className="flex items-center gap-2 mb-2">
+              <Icon className={`w-3.5 h-3.5 ${tint}`} />
+              <span className="text-[10px] font-mono text-gray-400 uppercase">{label}</span>
+            </div>
+            <p className="font-mono text-sm font-semibold text-white capitalize">{value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-4 text-xs font-mono text-gray-500">
+        <span>
+          Protocols:{' '}
+          <span className="text-white">
+            {status.protocols?.length ? status.protocols.join(', ') : 'none'}
+          </span>
+        </span>
+        <span>Sessions seen: <span className="text-white">{status.total_sessions}</span></span>
+        <span>
+          Anti-fingerprint:{' '}
+          <span className={status.anti_fingerprinting ? 'text-accent-green' : 'text-gray-500'}>
+            {status.anti_fingerprinting ? 'on' : 'off'}
+          </span>
+        </span>
+        <span>
+          Adaptive:{' '}
+          <span className={status.adaptive_response ? 'text-accent-green' : 'text-gray-500'}>
+            {status.adaptive_response ? 'on' : 'off'}
+          </span>
+        </span>
       </div>
     </div>
   )
@@ -76,298 +157,207 @@ export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [liveEvents, setLiveEvents] = useState([])
   const [alerts, setAlerts] = useState([])
-  const [honeypotStatus, setHoneypotStatus] = useState(null)
+  const [engine, setEngine] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
 
   const fetchData = useCallback(async () => {
     try {
-      const [statsData, eventsData, alertsData, hpStatus] = await Promise.all([
+      const [statsData, eventsData, alertsData, engineStatus] = await Promise.all([
         api.dashboard.stats(),
-        api.dashboard.liveEvents(20),
+        api.dashboard.liveEvents(50),
         api.alerts.list({ page: 1, page_size: 8, status: 'new' }),
         api.honeypot.status().catch(() => null),
       ])
       setStats(statsData)
-      setLiveEvents(eventsData)
+      setLiveEvents(eventsData || [])
       setAlerts(alertsData.alerts || [])
-      setHoneypotStatus(hpStatus)
+      setEngine(engineStatus)
+      setError(null)
     } catch (err) {
-      console.error('Dashboard fetch error:', err)
+      // Surface failures instead of only writing them to the console, which
+      // left the dashboard silently frozen on stale numbers.
+      setError(err.message)
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    fetchData()
-    const interval = setInterval(fetchData, 15000)
-    return () => clearInterval(interval)
+    // Deferred so the effect body performs no synchronous state update.
+    const timer = setTimeout(fetchData, 0)
+    const interval = setInterval(fetchData, REFRESH_MS)
+    return () => {
+      clearTimeout(timer)
+      clearInterval(interval)
+    }
   }, [fetchData])
 
   if (loading) return <LoadingSkeleton />
 
-  const attackDist = stats?.attack_distribution || {}
-  const totalAttacks = Object.values(attackDist).reduce((a, b) => a + b, 0) || 1
-  const attackBars = [
-    { type: 'SSH Brute Force',   pct: Math.round(((attackDist.exploitation || 0) * 0.38 / totalAttacks) * 100), color: 'bg-accent-red' },
-    { type: 'SQL Injection',      pct: Math.round(((attackDist.exploitation || 0) * 0.22 / totalAttacks) * 100), color: 'bg-accent-orange' },
-    { type: 'Port Scan',          pct: Math.round(((attackDist.reconnaissance || 0) * 0.6 / totalAttacks) * 100), color: 'bg-accent-blue' },
-    { type: 'RDP Exploit',        pct: Math.round(((attackDist.exploitation || 0) * 0.14 / totalAttacks) * 100), color: 'bg-yellow-500' },
-    { type: 'Other',              pct: Math.round(((attackDist.exfiltration || 0) / totalAttacks) * 100), color: 'bg-gray-600' },
-  ].filter(b => b.pct > 0)
+  // Index live events by session id so the alert table can resolve each
+  // alert's source. This used to compare a session UUID against a numeric
+  // session id, so the IP and origin columns were always "—".
+  const eventsBySession = new Map(liveEvents.map((e) => [e.session_id, e]))
 
-  if (attackBars.length === 0) {
-    attackBars.push(
-      { type: 'SSH Brute Force', pct: 38, color: 'bg-accent-red' },
-      { type: 'SQL Injection', pct: 22, color: 'bg-accent-orange' },
-      { type: 'Port Scan', pct: 18, color: 'bg-accent-blue' },
-      { type: 'RDP Exploit', pct: 14, color: 'bg-yellow-500' },
-      { type: 'Other', pct: 8, color: 'bg-gray-600' },
-    )
-  }
+  const distribution = stats?.attack_distribution || {}
+  const totalClassified = Object.values(distribution).reduce((a, b) => a + b, 0)
+  const categoryBars = Object.entries(distribution)
+    .map(([category, count]) => ({
+      category,
+      count,
+      pct: totalClassified ? Math.round((count / totalClassified) * 100) : 0,
+    }))
+    .sort((a, b) => b.count - a.count)
 
-  const severityMap = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' }
+  const cards = [
+    {
+      label: 'Total Sessions',
+      value: stats?.total_sessions ?? 0,
+      detail: `${stats?.sessions_today ?? 0} today`,
+      icon: Activity,
+      color: 'text-accent-blue',
+      border: 'border-accent-blue/20',
+    },
+    {
+      label: 'Open High-Severity Alerts',
+      value: stats?.high_severity_alerts ?? 0,
+      detail: `${stats?.active_sessions ?? 0} sessions in progress`,
+      icon: AlertTriangle,
+      color: 'text-accent-red',
+      border: 'border-accent-red/20',
+    },
+    {
+      label: 'Active Honeypots',
+      // Show the real count. This previously fell back to a hardcoded 4
+      // whenever the true value was 0.
+      value: stats?.active_honeypots ?? 0,
+      detail:
+        (stats?.active_honeypots ?? 0) === 0
+          ? 'No nodes registered'
+          : 'Registered nodes',
+      icon: Shield,
+      color: 'text-accent-green',
+      border: 'border-accent-green/20',
+    },
+    {
+      label: 'Unique Threat Origins',
+      value: stats?.unique_threat_origins ?? 0,
+      detail: `Across ${stats?.unique_countries ?? 0} known ${
+        (stats?.unique_countries ?? 0) === 1 ? 'country' : 'countries'
+      }`,
+      icon: Globe,
+      color: 'text-accent-cyan',
+      border: 'border-accent-cyan/20',
+    },
+  ]
 
   return (
     <div className="space-y-6 animate-fade-in">
+      {error && <ErrorBanner message={error} onRetry={fetchData} />}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        {[
-          {
-            label: 'Total Sessions',
-            value: stats?.total_sessions || 0,
-            delta: `+${stats?.sessions_today || 0} today`,
-            icon: Activity,
-            color: 'text-accent-blue',
-            glow: 'glow-blue',
-            border: 'border-accent-blue/20',
-          },
-          {
-            label: 'High Severity Alerts',
-            value: stats?.high_severity_alerts || 0,
-            delta: `${stats?.active_sessions || 0} active sessions`,
-            icon: AlertTriangle,
-            color: 'text-accent-red',
-            glow: 'glow-red',
-            border: 'border-accent-red/20',
-          },
-          {
-            label: 'Active Honeypots',
-            value: stats?.active_honeypots || 4,
-            delta: 'All nodes nominal',
-            icon: Shield,
-            color: 'text-accent-green',
-            glow: 'glow-green',
-            border: 'border-accent-green/20',
-          },
-          {
-            label: 'Unique Threat Origins',
-            value: stats?.unique_threat_origins || 0,
-            delta: `Across ${stats?.unique_countries || 0} countries`,
-            icon: Globe,
-            color: 'text-accent-cyan',
-            glow: '',
-            border: 'border-accent-cyan/20',
-          },
-        ].map((card) => {
-          const Icon = card.icon
-          return (
-            <div
-              key={card.label}
-              className={`bg-surface-800 border ${card.border} rounded-xl p-5 ${card.glow} transition-all hover:bg-surface-700`}
-            >
-              <div className="flex items-start justify-between mb-4">
-                <p className="text-xs font-mono text-gray-400 uppercase tracking-widest">
-                  {card.label}
-                </p>
-                <div className={`p-1.5 rounded-lg bg-surface-600`}>
-                  <Icon className={`w-4 h-4 ${card.color}`} />
-                </div>
-              </div>
-              <p className={`text-3xl font-mono font-bold ${card.color}`}>
-                {typeof card.value === 'number' ? card.value.toLocaleString() : card.value}
-              </p>
-              <p className="mt-2 text-xs font-mono text-gray-500 flex items-center gap-1">
-                <ArrowUpRight className="w-3 h-3" />
-                {card.delta}
-              </p>
-            </div>
-          )
-        })}
+        {cards.map((card) => <StatCard key={card.label} {...card} />)}
       </div>
 
-      {honeypotStatus && (
-        <div className="bg-surface-800 border border-border rounded-xl p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
-                Honeypot Engine Status
-              </h2>
-              <p className="text-xs font-mono text-gray-500 mt-0.5">
-                Emulation services &amp; security posture
-              </p>
-            </div>
-            <span className={`flex items-center gap-1.5 text-xs font-mono ${honeypotStatus.running ? 'text-accent-green' : 'text-accent-red'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${honeypotStatus.running ? 'bg-accent-green' : 'bg-accent-red'} animate-pulse`} />
-              {honeypotStatus.running ? 'Running' : 'Offline'}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <div className="bg-surface-700 rounded-lg p-3 border border-border/50">
-              <div className="flex items-center gap-2 mb-2">
-                <Terminal className="w-3.5 h-3.5 text-accent-cyan" />
-                <span className="text-[10px] font-mono text-gray-400 uppercase">Mode</span>
-              </div>
-              <p className="font-mono text-sm font-semibold text-white capitalize">
-                {honeypotStatus.mode}
-              </p>
-            </div>
-
-            <div className="bg-surface-700 rounded-lg p-3 border border-border/50">
-              <div className="flex items-center gap-2 mb-2">
-                <Server className="w-3.5 h-3.5 text-accent-blue" />
-                <span className="text-[10px] font-mono text-gray-400 uppercase">Protocols</span>
-              </div>
-              <div className="flex gap-1 flex-wrap">
-                {honeypotStatus.protocols.map(p => (
-                  <span key={p} className="text-[10px] font-mono bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/30 rounded px-1.5 py-0.5 uppercase">
-                    {p}
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            <div className="bg-surface-700 rounded-lg p-3 border border-border/50">
-              <div className="flex items-center gap-2 mb-2">
-                <Activity className="w-3.5 h-3.5 text-accent-orange" />
-                <span className="text-[10px] font-mono text-gray-400 uppercase">Active</span>
-              </div>
-              <p className="font-mono text-sm font-semibold text-accent-orange">
-                {honeypotStatus.active_sessions} sessions
-              </p>
-            </div>
-
-            <div className="bg-surface-700 rounded-lg p-3 border border-border/50">
-              <div className="flex items-center gap-2 mb-2">
-                <Lock className="w-3.5 h-3.5 text-accent-green" />
-                <span className="text-[10px] font-mono text-gray-400 uppercase">Isolation</span>
-              </div>
-              <p className="font-mono text-sm font-semibold text-accent-green">
-                {honeypotStatus.isolation?.overall_secure ? 'Secure' : 'Warning'}
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-4 flex gap-4 text-xs font-mono text-gray-500">
-            <span>Blocked IPs: <span className="text-white">{honeypotStatus.blocked_ips}</span></span>
-            <span>Total Sessions: <span className="text-white">{honeypotStatus.total_sessions}</span></span>
-            <span>Anti-fingerprint: <span className={honeypotStatus.anti_fingerprinting ? 'text-accent-green' : 'text-accent-red'}>{honeypotStatus.anti_fingerprinting ? 'ON' : 'OFF'}</span></span>
-            <span>Adaptive: <span className={honeypotStatus.adaptive_response ? 'text-accent-green' : 'text-accent-red'}>{honeypotStatus.adaptive_response ? 'ON' : 'OFF'}</span></span>
-          </div>
-        </div>
+      {engine?.reachable ? (
+        <EngineStatus status={engine} />
+      ) : (
+        <EngineOffline detail={engine?.detail} />
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
-        <div className="xl:col-span-3 bg-surface-800 border border-border rounded-xl p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
-                Geo-Attack Map
-              </h2>
-              <p className="text-xs font-mono text-gray-500 mt-0.5">
-                Real-time threat origin visualization
-              </p>
-            </div>
-            <span className="flex items-center gap-1.5 text-xs font-mono text-accent-green">
-              <span className="w-1.5 h-1.5 rounded-full bg-accent-green animate-pulse" />
-              Live
-            </span>
-          </div>
-          <GeoMapPlaceholder />
-        </div>
-
-        <div className="xl:col-span-2 bg-surface-800 border border-border rounded-xl p-5">
-          <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider mb-1">
+      <div className="bg-surface-800 border border-border rounded-xl p-5">
+        <div className="flex items-baseline justify-between mb-1">
+          <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
             Attack Distribution
           </h2>
-          <p className="text-xs font-mono text-gray-500 mb-5">Last 24 hours by type</p>
+          <Link to="/sessions" className="text-xs font-mono text-accent-cyan hover:underline">
+            View sessions
+          </Link>
+        </div>
+        <p className="text-xs font-mono text-gray-500 mb-5">
+          Classified sessions by category ({totalClassified.toLocaleString()} total)
+        </p>
+
+        {categoryBars.length === 0 ? (
+          <EmptyState
+            title="No classified sessions yet"
+            hint="Categories appear here once the honeypot engine ingests its first session."
+          />
+        ) : (
           <div className="space-y-3">
-            {attackBars.map(({ type, pct, color }) => (
-              <div key={type}>
+            {categoryBars.map(({ category, count, pct }) => (
+              <div key={category}>
                 <div className="flex justify-between text-xs font-mono text-gray-400 mb-1">
-                  <span>{type}</span>
-                  <span>{pct}%</span>
+                  <span>{CATEGORY_LABELS[category] || category}</span>
+                  <span>
+                    {count.toLocaleString()} ({pct}%)
+                  </span>
                 </div>
                 <div className="h-1.5 bg-surface-600 rounded-full overflow-hidden">
                   <div
-                    className={`h-full ${color} rounded-full transition-all duration-700`}
-                    style={{ width: `${Math.min(pct, 100)}%` }}
+                    className={`h-full ${CATEGORY_COLORS[category] || 'bg-gray-600'} rounded-full transition-all duration-700`}
+                    style={{ width: `${pct}%` }}
                   />
                 </div>
               </div>
             ))}
           </div>
-        </div>
+        )}
       </div>
 
       <div className="bg-surface-800 border border-border rounded-xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-          <div>
-            <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
-              Recent Alerts
-            </h2>
-            <p className="text-xs font-mono text-gray-500 mt-0.5">
-              Latest captured threat events
-            </p>
-          </div>
+        <div className="px-5 py-4 border-b border-border">
+          <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
+            New Alerts
+          </h2>
+          <p className="text-xs font-mono text-gray-500 mt-0.5">
+            Unacknowledged high-severity detections
+          </p>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full">
+            <caption className="sr-only">Unacknowledged alerts</caption>
             <thead>
               <tr className="border-b border-border">
-                {['Timestamp', 'IP Address', 'Origin', 'Attack Vector', 'Severity'].map(h => (
-                  <th
-                    key={h}
-                    className="text-left text-[10px] font-mono text-gray-500 uppercase tracking-widest px-5 py-3"
-                  >
+                {['Timestamp', 'IP Address', 'Origin', 'Detection', 'Severity'].map((h) => (
+                  <th key={h} scope="col" className="text-left text-[10px] font-mono text-gray-500 uppercase tracking-widest px-5 py-3">
                     {h}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {alerts.length > 0 ? alerts.map((alert) => (
-                <tr
-                  key={alert.id}
-                  className="border-b border-border/50 hover:bg-surface-700 transition-colors group"
-                >
-                  <td className="px-5 py-3 font-mono text-xs text-gray-400 whitespace-nowrap">
-                    {new Date(alert.created_at).toLocaleString()}
-                  </td>
-                  <td className="px-5 py-3 font-mono text-xs text-accent-blue whitespace-nowrap">
-                    {liveEvents.find(e => e.session_uuid === String(alert.session_id))?.attacker_ip || '—'}
-                  </td>
-                  <td className="px-5 py-3 font-mono text-xs text-gray-400">
-                    {liveEvents.find(e => e.session_uuid === String(alert.session_id))?.geo_country || '—'}
-                  </td>
-                  <td className="px-5 py-3 font-mono text-xs text-gray-300 whitespace-nowrap">
-                    {alert.title}
-                  </td>
-                  <td className="px-5 py-3">
-                    <span
-                      className={`inline-block text-[10px] font-mono font-semibold border rounded-full px-2.5 py-0.5 uppercase tracking-wider ${SEVERITY_COLORS[severityMap[alert.severity] || alert.severity] || SEVERITY_COLORS.Low}`}
-                    >
-                      {alert.severity}
-                    </span>
-                  </td>
-                </tr>
-              )) : (
+              {alerts.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="px-5 py-8 text-center font-mono text-sm text-gray-500">
                     No new alerts
                   </td>
                 </tr>
+              ) : (
+                alerts.map((alert) => {
+                  const event = eventsBySession.get(alert.session_id)
+                  return (
+                    <tr key={alert.id} className="border-b border-border/50 hover:bg-surface-700 transition-colors">
+                      <td className="px-5 py-3 font-mono text-xs text-gray-400 whitespace-nowrap">
+                        {new Date(alert.created_at).toLocaleString()}
+                      </td>
+                      <td className="px-5 py-3 font-mono text-xs text-accent-blue whitespace-nowrap">
+                        {event?.attacker_ip || '—'}
+                      </td>
+                      <td className="px-5 py-3 font-mono text-xs text-gray-400">
+                        {event?.geo_country || 'Unknown'}
+                      </td>
+                      <td className="px-5 py-3 font-mono text-xs text-gray-300">{alert.title}</td>
+                      <td className="px-5 py-3">
+                        <span className={`inline-block text-[10px] font-mono font-semibold border rounded-full px-2.5 py-0.5 uppercase tracking-wider ${SEVERITY_STYLES[alert.severity] || SEVERITY_STYLES.low}`}>
+                          {alert.severity}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>

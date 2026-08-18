@@ -33,10 +33,62 @@ class FeatureExtractor:
 
     @staticmethod
     def extract_from_session(session_data: Dict) -> np.ndarray:
-        features = []
-        for feat in FeatureExtractor.CICIDS_FEATURES:
-            features.append(session_data.get(feat, 0.0))
-        return np.array(features).reshape(1, -1)
+        values = [
+            session_data.get(feat, 0.0)
+            for feat in FeatureExtractor.CICIDS_FEATURES
+        ]
+        return FeatureExtractor._normalise(values)
+
+    #: Rough upper bound per feature, used to map raw observations into the
+    #: [0, 1] range the model is trained on. Without this, raw magnitudes
+    #: (durations in seconds, byte counts) were fed to a model fitted on
+    #: clipped [0, 1] data, so predictions were effectively arbitrary.
+    FEATURE_SCALES = {
+        "flow_duration": 600.0,
+        "total_fwd_packets": 500.0,
+        "total_bwd_packets": 500.0,
+        "fwd_packet_length_mean": 1500.0,
+        "fwd_packet_length_std": 1500.0,
+        "bwd_packet_length_mean": 1500.0,
+        "bwd_packet_length_std": 1500.0,
+        "flow_bytes_per_second": 100000.0,
+        "flow_packets_per_second": 500.0,
+        "fwd_header_length": 500.0,
+        "bwd_header_length": 500.0,
+        "fwd_packets_per_second": 200.0,
+        "bwd_packets_per_second": 200.0,
+        "min_packet_length": 1500.0,
+        "max_packet_length": 1500.0,
+        "packet_length_mean": 1500.0,
+        "packet_length_std": 1500.0,
+        "packet_length_variance": 1000000.0,
+        "fin_flag_count": 50.0,
+        "syn_flag_count": 50.0,
+        "rst_flag_count": 50.0,
+        "psh_flag_count": 100.0,
+        "ack_flag_count": 200.0,
+        "urg_flag_count": 20.0,
+        "down_up_ratio": 10.0,
+        "average_packet_size": 1500.0,
+        "fwd_segment_size_mean": 1500.0,
+        "bwd_segment_size_mean": 1500.0,
+        "fwd_bytes_per_bulk": 10000.0,
+        "fwd_bulk_rate": 10000.0,
+        "subflow_fwd_packets": 500.0,
+        "subflow_bwd_packets": 500.0,
+        "active_mean": 300.0,
+        "active_std": 300.0,
+        "idle_mean": 300.0,
+        "idle_std": 300.0,
+    }
+
+    @classmethod
+    def _normalise(cls, values: List[float]) -> np.ndarray:
+        scaled = [
+            min(max(float(value) / cls.FEATURE_SCALES[name], 0.0), 1.0)
+            for name, value in zip(cls.CICIDS_FEATURES, values)
+        ]
+        return np.array(scaled).reshape(1, -1)
 
     @staticmethod
     def extract_from_raw(
@@ -88,7 +140,9 @@ class FeatureExtractor:
             0, 0, 0, 0,
             command_entropy, unique_commands,
         ]
-        return np.array(features[:len(FeatureExtractor.CICIDS_FEATURES)]).reshape(1, -1)
+        return FeatureExtractor._normalise(
+            features[: len(FeatureExtractor.CICIDS_FEATURES)]
+        )
 
     @staticmethod
     def _shannon_entropy(text: str) -> float:
@@ -106,6 +160,7 @@ class AttackClassifier:
         self.model: Optional[RandomForestClassifier] = None
         self.label_encoder: Optional[LabelEncoder] = None
         self.feature_extractor = FeatureExtractor()
+        self.model_source = "unloaded"
         self._loaded = False
 
     def _ensure_loaded(self):
@@ -113,15 +168,28 @@ class AttackClassifier:
             return
         model_path = settings.MODEL_PATH_RF
         if os.path.exists(model_path):
+            # pickle executes arbitrary code on load, so only ever read the
+            # operator-controlled path from configuration, never user input.
             with open(model_path, "rb") as f:
                 data = pickle.load(f)
-                self.model = data["model"]
-                self.label_encoder = data["label_encoder"]
+            self.model = data["model"]
+            self.label_encoder = data["label_encoder"]
+            self.model_source = data.get("source", "pretrained")
         else:
             self._train_default_model()
+            self.model_source = "synthetic"
         self._loaded = True
 
     def _train_default_model(self):
+        """Fit a bootstrap model on synthetic traffic.
+
+        This exists so a fresh deployment has *something* to classify with;
+        it is not trained on real capture data and its confidence scores are
+        not calibrated. Responses are tagged ``model_source: synthetic``
+        so the UI never presents them as ground truth. Replace by training on
+        a labelled corpus (e.g. CIC-IDS2017) and dropping the artefact at
+        MODEL_PATH_RF.
+        """
         np.random.seed(42)
         n_samples = 2000
         n_features = len(FeatureExtractor.CICIDS_FEATURES)
@@ -155,41 +223,45 @@ class AttackClassifier:
 
         os.makedirs(os.path.dirname(settings.MODEL_PATH_RF) or ".", exist_ok=True)
         with open(settings.MODEL_PATH_RF, "wb") as f:
-            pickle.dump({"model": self.model, "label_encoder": self.label_encoder}, f)
+            pickle.dump(
+                {
+                    "model": self.model,
+                    "label_encoder": self.label_encoder,
+                    "source": "synthetic",
+                },
+                f,
+            )
+
+    def _predict(self, features: np.ndarray) -> Dict:
+        prediction = self.model.predict(features)[0]
+        probabilities = self.model.predict_proba(features)[0]
+        return {
+            "category": str(self.label_encoder.inverse_transform([prediction])[0]),
+            "confidence": float(max(probabilities)),
+            "probabilities": {
+                str(label): float(prob)
+                for label, prob in zip(
+                    self.label_encoder.classes_, probabilities
+                )
+            },
+            # Consumers must be able to tell a bootstrap verdict from one
+            # produced by a model trained on real labelled traffic.
+            "model_source": self.model_source,
+        }
 
     def classify(self, session_data: Dict) -> Dict:
         self._ensure_loaded()
-        features = self.feature_extractor.extract_from_session(session_data)
-        prediction = self.model.predict(features)[0]
-        probabilities = self.model.predict_proba(features)[0]
-        category = self.label_encoder.inverse_transform([prediction])[0]
-        confidence = float(max(probabilities))
+        return self._predict(
+            self.feature_extractor.extract_from_session(session_data)
+        )
 
-        return {
-            "category": category,
-            "confidence": confidence,
-            "probabilities": {
-                label: float(prob)
-                for label, prob in zip(self.label_encoder.classes_, probabilities)
-            },
-        }
-
-    def classify_raw(self, packets: List[Dict], commands: List[str], duration: float) -> Dict:
+    def classify_raw(
+        self, packets: List[Dict], commands: List[str], duration: float
+    ) -> Dict:
         self._ensure_loaded()
-        features = self.feature_extractor.extract_from_raw(packets, commands, duration)
-        prediction = self.model.predict(features)[0]
-        probabilities = self.model.predict_proba(features)[0]
-        category = self.label_encoder.inverse_transform([prediction])[0]
-        confidence = float(max(probabilities))
-
-        return {
-            "category": category,
-            "confidence": confidence,
-            "probabilities": {
-                label: float(prob)
-                for label, prob in zip(self.label_encoder.classes_, probabilities)
-            },
-        }
+        return self._predict(
+            self.feature_extractor.extract_from_raw(packets, commands, duration)
+        )
 
 
 classifier = AttackClassifier()

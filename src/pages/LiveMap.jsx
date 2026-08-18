@@ -1,69 +1,99 @@
-import { useState, useEffect, useCallback } from 'react'
-import { MapContainer, TileLayer, CircleMarker, Popup, Tooltip } from 'react-leaflet'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { CircleMarker, MapContainer, Popup, TileLayer, Tooltip } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
+import { MapPinOff } from 'lucide-react'
 import { api } from '../services/api'
+import ErrorBanner from '../components/ErrorBanner'
 
 const SEVERITY_CONFIG = {
   critical: { color: '#f85149', radius: 10, opacity: 0.9 },
-  high:     { color: '#e3692a', radius: 8, opacity: 0.8 },
-  medium:   { color: '#58a6ff', radius: 6, opacity: 0.7 },
-  low:      { color: '#3fb950', radius: 4, opacity: 0.6 },
+  high: { color: '#e3692a', radius: 8, opacity: 0.8 },
+  medium: { color: '#58a6ff', radius: 6, opacity: 0.7 },
+  low: { color: '#3fb950', radius: 4, opacity: 0.6 },
 }
+
+const FILTERS = ['all', 'critical', 'high', 'medium', 'low']
+const REFRESH_MS = 10000
 
 export default function LiveMap() {
   const [events, setEvents] = useState([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
   const [filter, setFilter] = useState('all')
 
   const fetchEvents = useCallback(async () => {
     try {
-      const data = await api.dashboard.liveEvents(100)
-      setEvents(data || [])
+      setEvents((await api.dashboard.liveEvents(200)) || [])
+      setError(null)
     } catch (err) {
-      console.error('LiveMap fetch error:', err)
+      setError(err.message)
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    fetchEvents()
-    const interval = setInterval(fetchEvents, 10000)
-    return () => clearInterval(interval)
+    // Deferred so the effect body performs no synchronous state update.
+    const timer = setTimeout(fetchEvents, 0)
+    const interval = setInterval(fetchEvents, REFRESH_MS)
+    return () => {
+      clearTimeout(timer)
+      clearInterval(interval)
+    }
   }, [fetchEvents])
 
-  const filteredEvents = events.filter(e => {
-    if (filter === 'all') return true
-    return e.severity === filter
-  })
+  // An event is mappable only when geolocation actually resolved. Sessions
+  // without a location are counted separately rather than silently dropped.
+  const locatable = useMemo(
+    () =>
+      events.filter(
+        (e) => typeof e.geo_lat === 'number' && typeof e.geo_lon === 'number',
+      ),
+    [events],
+  )
 
-  const validEvents = filteredEvents.filter(e => e.geo_lat && e.geo_lon)
+  // Counts per severity are computed once over the whole set, so each filter
+  // button shows its own total. The button label previously interpolated an
+  // object and rendered "[object Object]" on every severity chip.
+  const countsBySeverity = useMemo(() => {
+    const counts = { all: locatable.length }
+    for (const key of Object.keys(SEVERITY_CONFIG)) counts[key] = 0
+    for (const event of locatable) {
+      if (event.severity in counts) counts[event.severity] += 1
+    }
+    return counts
+  }, [locatable])
 
-  const countryCounts = {}
-  validEvents.forEach(e => {
-    const key = e.geo_country || 'Unknown'
-    countryCounts[key] = (countryCounts[key] || 0) + 1
-  })
+  const visible = useMemo(
+    () => (filter === 'all' ? locatable : locatable.filter((e) => e.severity === filter)),
+    [locatable, filter],
+  )
+
+  const unlocatable = events.length - locatable.length
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      {error && <ErrorBanner message={error} onRetry={fetchEvents} />}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-4">
           <span className="text-xs font-mono text-gray-400">
-            {validEvents.length} threat markers
+            {visible.length} of {events.length} events mapped
           </span>
-          <div className="flex gap-2">
-            {['all', 'critical', 'high', 'medium', 'low'].map(f => (
+          <div className="flex flex-wrap gap-2">
+            {FILTERS.map((key) => (
               <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-3 py-1 text-xs font-mono rounded-full border transition-all ${
-                  filter === f
+                key={key}
+                type="button"
+                aria-pressed={filter === key}
+                onClick={() => setFilter(key)}
+                className={`px-3 py-1 text-xs font-mono rounded-full border transition-all capitalize ${
+                  filter === key
                     ? 'bg-surface-600 border-border text-white'
                     : 'border-border/50 text-gray-500 hover:text-gray-300'
                 }`}
               >
-                {f === 'all' ? `All (${validEvents.length})` : `${f} (${countryCounts})`}
+                {key} ({countsBySeverity[key] ?? 0})
               </button>
             ))}
           </div>
@@ -79,7 +109,16 @@ export default function LiveMap() {
         </div>
       </div>
 
-      <div className="h-[calc(100vh-12rem)] rounded-xl overflow-hidden border border-border">
+      {unlocatable > 0 && (
+        <div className="flex items-center gap-2 text-xs font-mono text-gray-500 bg-surface-800 border border-border rounded-lg px-3 py-2">
+          <MapPinOff className="w-3.5 h-3.5 shrink-0" />
+          {unlocatable} event{unlocatable === 1 ? '' : 's'} could not be
+          geolocated and {unlocatable === 1 ? 'is' : 'are'} not shown. Configure
+          GEOIP_DB_PATH with a MaxMind GeoLite2 database to resolve locations.
+        </div>
+      )}
+
+      <div className="h-[calc(100vh-14rem)] rounded-xl overflow-hidden border border-border">
         {loading ? (
           <div className="h-full bg-surface-800 flex items-center justify-center">
             <div className="flex items-center gap-3">
@@ -92,19 +131,18 @@ export default function LiveMap() {
             center={[20, 0]}
             zoom={2}
             style={{ height: '100%', width: '100%', background: '#0d1117' }}
-            attributionControl={false}
-            zoomControl={false}
+            worldCopyJump
           >
             <TileLayer
               url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-              attribution='&copy; <a href="https://carto.com/">CARTO</a>'
+              attribution='&copy; <a href="https://carto.com/">CARTO</a> &copy; OpenStreetMap contributors'
             />
 
-            {validEvents.map((event, i) => {
+            {visible.map((event) => {
               const cfg = SEVERITY_CONFIG[event.severity] || SEVERITY_CONFIG.low
               return (
                 <CircleMarker
-                  key={`${event.session_uuid}-${i}`}
+                  key={event.session_uuid}
                   center={[event.geo_lat, event.geo_lon]}
                   radius={cfg.radius}
                   pathOptions={{
@@ -117,17 +155,19 @@ export default function LiveMap() {
                   <Tooltip direction="top" offset={[0, -10]}>
                     <div className="font-mono text-xs">
                       <div className="font-semibold">{event.attacker_ip}</div>
-                      <div className="text-gray-400">{event.geo_country}</div>
-                      <div className="text-gray-500">{event.attack_category || 'unknown'}</div>
+                      <div>{event.geo_country_name || event.geo_country || 'Unknown'}</div>
                     </div>
                   </Tooltip>
                   <Popup>
                     <div className="font-mono text-xs space-y-1">
-                      <div className="font-semibold text-accent-blue">{event.attacker_ip}</div>
-                      <div>Country: {event.geo_country}</div>
-                      <div>Category: {event.attack_category || 'unknown'}</div>
-                      <div>Severity: <span style={{ color: cfg.color }}>{event.severity}</span></div>
-                      <div className="text-gray-500">{new Date(event.timestamp).toLocaleString()}</div>
+                      <div className="font-semibold">{event.attacker_ip}</div>
+                      <div>Country: {event.geo_country_name || event.geo_country || 'Unknown'}</div>
+                      <div>Protocol: {event.protocol || 'unknown'}</div>
+                      <div>Category: {event.attack_category || 'unclassified'}</div>
+                      <div>
+                        Severity: <span style={{ color: cfg.color }}>{event.severity}</span>
+                      </div>
+                      <div>{new Date(event.timestamp).toLocaleString()}</div>
                     </div>
                   </Popup>
                 </CircleMarker>

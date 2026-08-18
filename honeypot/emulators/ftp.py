@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import os
 import random
@@ -66,7 +67,9 @@ class FTPHoneypot(BaseEmulator):
         state = FTPSessionState()
 
         try:
-            banner = self.get_banner()
+            # The rotating banner strings carry no line terminator; without
+            # CRLF a real FTP client blocks forever waiting for the greeting.
+            banner = self.get_banner().rstrip("\r\n") + "\r\n"
             await self._send_response(writer, banner)
             await session_manager.record_network_event(
                 session_id, "ftp_banner_sent", {"banner": banner.strip()}
@@ -119,6 +122,8 @@ class FTPHoneypot(BaseEmulator):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> str:
+        local_ip = self._get_local_ip(writer)
+
         parts = line.split(None, 1)
         cmd = parts[0].upper()
         arg = parts[1] if len(parts) > 1 else ""
@@ -157,7 +162,7 @@ class FTPHoneypot(BaseEmulator):
             "CDUP": lambda: self._cmd_cdup(state),
             "XCUP": lambda: self._cmd_cdup(state),
             "TYPE": lambda: self._cmd_type(arg, state),
-            "PASV": lambda: self._cmd_pasv(source_ip),
+            "PASV": lambda: self._cmd_pasv(local_ip),
             "EPSV": lambda: "229 Entering Extended Passive Mode (|||50000|)\r\n",
             "PORT": lambda: self._cmd_port(arg, state),
             "LIST": lambda: self._cmd_list(session_id, arg, state),
@@ -185,26 +190,42 @@ class FTPHoneypot(BaseEmulator):
         }
 
         handler = handlers.get(cmd)
-        if handler:
-            return handler()
+        if handler is None:
+            return f"502 Command not implemented: {cmd}\r\n"
 
-        return f"502 Command not implemented: {cmd}\r\n"
+        result = handler()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
     def _cmd_user(self, arg: str, state: FTPSessionState) -> str:
         state.username = arg or "anonymous"
         return "331 Please specify the password.\r\n"
 
-    def _cmd_pass(
+    async def _cmd_pass(
         self, arg: str, state: FTPSessionState, session_id: str
     ) -> str:
         state.password = arg
         username = state.username or "anonymous"
+        accepted = username in self._fake_users
 
-        if username in self._fake_users:
+        # Log the credentials the attacker tried together with whether the
+        # emulator accepted them. Recording every attempt as a success would
+        # make the captured brute-force data useless.
+        await session_manager.record_auth_attempt(
+            session_id, username, arg, accepted
+        )
+
+        if accepted:
             state.authenticated = True
             return "230 Login successful.\r\n"
 
         return "530 Login incorrect.\r\n"
+
+    @staticmethod
+    def _get_local_ip(writer: asyncio.StreamWriter) -> str:
+        sock = writer.get_extra_info("sockname")
+        return sock[0] if sock else "0.0.0.0"
 
     def _cmd_quit(self) -> str:
         return "221 Goodbye.\r\n"
@@ -239,14 +260,18 @@ class FTPHoneypot(BaseEmulator):
         state.transfer_type = arg.upper() if arg else "I"
         return f"200 Switching to {'Binary' if state.transfer_type == 'I' else 'ASCII'} mode.\r\n"
 
-    def _cmd_pasv(self, source_ip: str) -> str:
+    def _cmd_pasv(self, local_ip: str) -> str:
+        # PASV must advertise the address the *server* listens on. IPv6 peers
+        # cannot be expressed in the classic PASV quad form, so refuse instead
+        # of emitting a malformed reply.
         port = random.randint(50000, 50100)
-        p1 = port // 256
-        p2 = port % 256
-        ip_parts = source_ip.split(".")
+        p1, p2 = port // 256, port % 256
+        octets = local_ip.split(".")
+        if len(octets) != 4:
+            return "425 Use EPSV instead.\r\n"
         return (
-            f"227 Entering Passive Mode ({ip_parts[0]},{ip_parts[1]},"
-            f"{ip_parts[2]},{ip_parts[3]},{p1},{p2}).\r\n"
+            f"227 Entering Passive Mode ({octets[0]},{octets[1]},"
+            f"{octets[2]},{octets[3]},{p1},{p2}).\r\n"
         )
 
     def _cmd_port(self, arg: str, state: FTPSessionState) -> str:
@@ -259,7 +284,7 @@ class FTPHoneypot(BaseEmulator):
             pass
         return "501 Syntax error.\r\n"
 
-    def _cmd_list(self, session_id: str, arg: str, state: FTPSessionState) -> str:
+    async def _cmd_list(self, session_id: str, arg: str, state: FTPSessionState) -> str:
         path = state.cwd
         if arg and not arg.startswith("-"):
             if arg.startswith("/"):
@@ -306,7 +331,7 @@ class FTPHoneypot(BaseEmulator):
         result += "226 Transfer complete.\r\n"
         return result
 
-    def _cmd_retr(self, session_id: str, arg: str, state: FTPSessionState) -> str:
+    async def _cmd_retr(self, session_id: str, arg: str, state: FTPSessionState) -> str:
         if not arg:
             return "501 Syntax error.\r\n"
 

@@ -1,52 +1,98 @@
+"""Outbound notification for high-severity detections."""
+
 from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import html
 import json
-import smtplib
-import httpx
 import logging
-from email.mime.text import MIMEText
+import smtplib
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
-from typing import Dict, List, Optional
+from email.mime.text import MIMEText
+from typing import Dict
+
+import httpx
+
 from app.core.config import get_settings
 from app.schemas import AttackSeverity
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
+SEVERITY_COLORS = {
+    "CRITICAL": "#f85149",
+    "HIGH": "#e3692a",
+    "MEDIUM": "#f0ad4e",
+    "LOW": "#3fb950",
+}
+
+
+def _esc(value) -> str:
+    """Escape a value for inclusion in the HTML alert body.
+
+    Everything in an alert - the IP, the detected tool names, the description -
+    derives from attacker-controlled input. Interpolating it raw let an
+    attacker inject markup and links into the SOC's inbox.
+    """
+    return html.escape("" if value is None else str(value), quote=True)
+
 
 class AlertingService:
     async def send_alert(self, alert_data: Dict) -> bool:
-        severity = alert_data.get("severity", "low")
+        try:
+            severity = AttackSeverity(alert_data.get("severity", "low"))
+        except ValueError:
+            severity = AttackSeverity.LOW
+
+        if severity not in (AttackSeverity.HIGH, AttackSeverity.CRITICAL):
+            return True
+
         results = []
+        if settings.ALERT_EMAIL_TO:
+            results.append(await self._send_email(alert_data))
+        if settings.WEBHOOK_URL:
+            results.append(await self._send_webhook(alert_data))
 
-        if AttackSeverity(severity) in (AttackSeverity.HIGH, AttackSeverity.CRITICAL):
-            if settings.ALERT_EMAIL_TO:
-                results.append(await self._send_email(alert_data))
-            if settings.WEBHOOK_URL:
-                results.append(await self._send_webhook(alert_data))
-
-        return any(results) if results else True
+        if not results:
+            logger.debug(
+                "High-severity alert raised but no notification channel is "
+                "configured (set ALERT_EMAIL_TO and/or WEBHOOK_URL)"
+            )
+            return True
+        return any(results)
 
     async def _send_email(self, alert_data: Dict) -> bool:
+        # smtplib is synchronous; calling it inline blocked the event loop for
+        # the full duration of the SMTP conversation.
+        return await asyncio.to_thread(self._send_email_blocking, alert_data)
+
+    def _send_email_blocking(self, alert_data: Dict) -> bool:
         try:
             msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"[HoneySentinel] {alert_data.get('severity', 'UNKNOWN').upper()} Alert: {alert_data.get('title', '')}"
+            severity = str(alert_data.get("severity", "unknown")).upper()
+            msg["Subject"] = (
+                f"[HoneySentinel] {severity} Alert: "
+                f"{alert_data.get('title', '')}"
+            )
             msg["From"] = settings.ALERT_EMAIL_FROM
             msg["To"] = settings.ALERT_EMAIL_TO
+            msg.attach(MIMEText(self._format_email_body(alert_data), "html"))
 
-            body = self._format_email_body(alert_data)
-            msg.attach(MIMEText(body, "html"))
-
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+            with smtplib.SMTP(
+                settings.SMTP_HOST, settings.SMTP_PORT, timeout=20
+            ) as server:
                 server.starttls()
                 if settings.SMTP_USER and settings.SMTP_PASSWORD:
                     server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                server.sendmail(settings.ALERT_EMAIL_FROM, settings.ALERT_EMAIL_TO, msg.as_string())
+                server.send_message(msg)
 
-            logger.info(f"Alert email sent for: {alert_data.get('title')}")
+            logger.info("Alert email sent for: %s", alert_data.get("title"))
             return True
-        except Exception as e:
-            logger.error(f"Failed to send alert email: {e}")
+        except Exception as exc:
+            logger.error("Failed to send alert email: %s", exc)
             return False
 
     async def _send_webhook(self, alert_data: Dict) -> bool:
@@ -54,58 +100,81 @@ class AlertingService:
             payload = {
                 "source": "HoneySentinel",
                 "event_type": "high_severity_alert",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": alert_data,
             }
+            body = json.dumps(payload, default=str)
+            headers = {"Content-Type": "application/json"}
+
+            # Let the receiver verify the alert really came from us.
+            secret = settings.WEBHOOK_SECRET
+            if secret:
+                headers["X-HoneySentinel-Signature"] = hmac.new(
+                    secret.encode(), body.encode(), hashlib.sha256
+                ).hexdigest()
+
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.post(
-                    settings.WEBHOOK_URL,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
+                    settings.WEBHOOK_URL, content=body, headers=headers
                 )
                 response.raise_for_status()
 
-            logger.info(f"Alert webhook sent to {settings.WEBHOOK_URL}")
+            logger.info("Alert webhook delivered")
             return True
-        except Exception as e:
-            logger.error(f"Failed to send alert webhook: {e}")
+        except Exception as exc:
+            logger.error("Failed to send alert webhook: %s", exc)
             return False
 
     def _format_email_body(self, alert_data: Dict) -> str:
-        severity = alert_data.get("severity", "unknown").upper()
-        color = {"CRITICAL": "#f85149", "HIGH": "#e3692a", "MEDIUM": "#f0ad4e", "LOW": "#3fb950"}.get(severity, "#6b7280")
+        severity = str(alert_data.get("severity", "unknown")).upper()
+        color = SEVERITY_COLORS.get(severity, "#6b7280")
 
-        geo = alert_data.get("geo", {})
-        geo_str = f"{geo.get('city', 'Unknown')}, {geo.get('country_name', geo.get('country', 'Unknown'))}"
+        geo = alert_data.get("geo") or {}
+        geo_str = (
+            f"{geo.get('city') or 'Unknown'}, "
+            f"{geo.get('country_name') or geo.get('country') or 'Unknown'}"
+        )
 
-        mitre = alert_data.get("mitre_techniques", [])
-        mitre_str = ", ".join([f"{t.get('id', '')}: {t.get('name', '')}" for t in mitre]) if mitre else "N/A"
+        techniques = alert_data.get("mitre_techniques") or []
+        mitre_str = (
+            ", ".join(
+                f"{t.get('id', '')}: {t.get('name', '')}"
+                for t in techniques
+                if isinstance(t, dict)
+            )
+            or "N/A"
+        )
+
+        rows = [
+            ("Severity", severity),
+            ("Title", alert_data.get("title", "N/A")),
+            ("Description", alert_data.get("description", "N/A")),
+            ("Attacker IP", alert_data.get("attacker_ip", "N/A")),
+            ("Location", geo_str),
+            ("Attack Category", alert_data.get("attack_category", "N/A")),
+            ("Attacker Profile", alert_data.get("attacker_profile", "N/A")),
+            ("MITRE ATT&CK", mitre_str),
+            (
+                "Detected Tools",
+                ", ".join(alert_data.get("detected_tools") or []) or "N/A",
+            ),
+            (
+                "Timestamp",
+                alert_data.get("timestamp")
+                or datetime.now(timezone.utc).isoformat(),
+            ),
+        ]
+
+        body_rows = "".join(
+            f'<tr><td style="padding:5px 15px 5px 0;color:#8b949e;">{_esc(label)}:</td>'
+            f'<td style="padding:5px;">{_esc(value)}</td></tr>'
+            for label, value in rows
+        )
 
         return f"""
         <html><body style="font-family: monospace; background: #0d1117; color: #e6edf3; padding: 20px;">
             <h2 style="color: {color};">HoneySentinel Alert</h2>
-            <table style="border-collapse: collapse;">
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Severity:</td>
-                    <td style="padding: 5px; color: {color}; font-weight: bold;">{severity}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Title:</td>
-                    <td style="padding: 5px;">{alert_data.get('title', 'N/A')}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Description:</td>
-                    <td style="padding: 5px;">{alert_data.get('description', 'N/A')}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Attacker IP:</td>
-                    <td style="padding: 5px;">{alert_data.get('attacker_ip', 'N/A')}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Location:</td>
-                    <td style="padding: 5px;">{geo_str}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Attack Category:</td>
-                    <td style="padding: 5px;">{alert_data.get('attack_category', 'N/A')}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Attacker Profile:</td>
-                    <td style="padding: 5px;">{alert_data.get('attacker_profile', 'N/A')}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">MITRE ATT&CK:</td>
-                    <td style="padding: 5px;">{mitre_str}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Detected Tools:</td>
-                    <td style="padding: 5px;">{', '.join(alert_data.get('detected_tools', [])) or 'N/A'}</td></tr>
-                <tr><td style="padding: 5px 15px 5px 0; color: #8b949e;">Timestamp:</td>
-                    <td style="padding: 5px;">{alert_data.get('timestamp', datetime.utcnow().isoformat())}</td></tr>
-            </table>
+            <table style="border-collapse: collapse;">{body_rows}</table>
             <br>
             <p style="color: #8b949e; font-size: 12px;">This is an automated alert from HoneySentinel AI.</p>
         </body></html>

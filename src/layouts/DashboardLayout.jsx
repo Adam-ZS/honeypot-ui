@@ -1,11 +1,12 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   ShieldAlert, LayoutDashboard, Map, FileText,
   Settings, Bell, ChevronDown, LogOut, Menu,
   Activity,
 } from 'lucide-react'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
+import { api } from '../services/api'
 
 const NAV = [
   { to: '/',          label: 'Dashboard',    icon: LayoutDashboard },
@@ -14,11 +15,39 @@ const NAV = [
   { to: '/settings',  label: 'Settings',     icon: Settings },
 ]
 
+const STATUS_POLL_MS = 30000
+
 export default function DashboardLayout() {
   const { user, logout } = useAuth()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
+  const [engine, setEngine] = useState(null)
+  const [nodeCount, setNodeCount] = useState(null)
+  const [newAlerts, setNewAlerts] = useState(0)
   const location = useLocation()
+
+  useEffect(() => {
+    let cancelled = false
+
+    const poll = async () => {
+      const [status, nodes, alertStats] = await Promise.all([
+        api.honeypot.status().catch(() => ({ reachable: false })),
+        api.nodes.list(true).catch(() => null),
+        api.alerts.stats().catch(() => null),
+      ])
+      if (cancelled) return
+      setEngine(status)
+      setNodeCount(nodes ? nodes.length : null)
+      setNewAlerts(alertStats?.new ?? 0)
+    }
+
+    poll()
+    const interval = setInterval(poll, STATUS_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
 
   const pageTitle = NAV.find(n => n.to === location.pathname)?.label ?? 'Dashboard'
 
@@ -71,12 +100,33 @@ export default function DashboardLayout() {
 
         <div className="mt-auto px-4 py-5 border-t border-border">
           <div className="flex items-center gap-2 mb-3">
-            <div className="w-2 h-2 rounded-full bg-accent-green animate-pulse-slow" />
-            <span className="text-xs font-mono text-gray-400">System Nominal</span>
+            <div
+              className={`w-2 h-2 rounded-full ${
+                engine === null
+                  ? 'bg-gray-600'
+                  : engine.reachable && engine.running
+                    ? 'bg-accent-green animate-pulse-slow'
+                    : 'bg-accent-red'
+              }`}
+            />
+            <span className="text-xs font-mono text-gray-400">
+              {engine === null
+                ? 'Checking engine...'
+                : engine.reachable
+                  ? engine.running ? 'Engine running' : 'Engine stopped'
+                  : 'Engine unreachable'}
+            </span>
           </div>
           <div className="text-[10px] font-mono text-gray-600 space-y-0.5">
-            <p>4 Honeypots Active</p>
-            <p>Threat Feed: Live</p>
+            <p>
+              {nodeCount === null
+                ? 'Nodes: —'
+                : `${nodeCount} honeypot node${nodeCount === 1 ? '' : 's'} active`}
+            </p>
+            <p>
+              Protocols:{' '}
+              {engine?.protocols?.length ? engine.protocols.join(', ') : 'none'}
+            </p>
           </div>
         </div>
       </aside>
@@ -99,10 +149,22 @@ export default function DashboardLayout() {
           </div>
 
           <div className="flex items-center gap-2">
-            <button className="relative p-2 text-gray-400 hover:text-white transition-colors">
+            <NavLink
+              to="/sessions"
+              aria-label={
+                newAlerts > 0
+                  ? `${newAlerts} new alerts. View sessions.`
+                  : 'No new alerts'
+              }
+              className="relative p-2 text-gray-400 hover:text-white transition-colors"
+            >
               <Bell className="w-5 h-5" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-accent-red border border-surface-800" />
-            </button>
+              {newAlerts > 0 && (
+                <span className="absolute top-0.5 right-0.5 min-w-[1rem] h-4 px-1 flex items-center justify-center rounded-full bg-accent-red text-[9px] font-mono font-bold text-white">
+                  {newAlerts > 99 ? '99+' : newAlerts}
+                </span>
+              )}
+            </NavLink>
 
             <div className="relative">
               <button

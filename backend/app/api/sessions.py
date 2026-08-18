@@ -1,39 +1,47 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
 from typing import Optional
-import json
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_role, verify_honeypot_token
 from app.models import HoneypotSession, HoneypotNode, AuditLog, SessionStatus, AttackCategory, AttackerProfile
 from app.schemas import HoneypotSessionResponse, SessionListResponse, SessionFilter
+from app.api.export import FILE_EXTENSIONS, MEDIA_TYPES, _render
 from app.services.analysis import analysis_pipeline
-from app.services.report_generator import report_generator
 
 router = APIRouter()
 
-import os
-HONEYPOT_SERVICE_TOKEN = os.environ.get("HONEYPOT_INGEST_TOKEN", "honeypot-ingest-token-change-in-production")
+
+def _escape_like(value: str) -> str:
+    """Neutralise LIKE wildcards in user-supplied search text."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def verify_honeypot_token(request: Request):
-    token = request.headers.get("X-Honeypot-Token", "")
-    if token != HONEYPOT_SERVICE_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid honeypot token")
-    return True
+def _parse_enum(enum_cls, value: str, field: str):
+    """Map a query-string value onto an enum, or raise 400.
+
+    Passing the raw value to the enum constructor made an unknown filter
+    value raise ValueError, which surfaced to the client as a 500.
+    """
+    try:
+        return enum_cls(value)
+    except ValueError:
+        allowed = ", ".join(member.value for member in enum_cls)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field} {value!r}. Expected one of: {allowed}",
+        )
 
 
-@router.post("/ingest-internal")
+@router.post("/ingest-internal", dependencies=[Depends(verify_honeypot_token)])
 async def ingest_session_from_honeypot(
-    request: Request,
     session_data: dict,
     node_id: int = Query(1),
     db: AsyncSession = Depends(get_db),
 ):
-    verify_honeypot_token(request)
-
+    """Ingest a session from the honeypot engine (service-to-service)."""
     node_result = await db.execute(select(HoneypotNode).where(HoneypotNode.id == node_id))
     node = node_result.scalar_one_or_none()
     if not node:
@@ -71,32 +79,43 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    query = select(HoneypotSession).options()
+    query = select(HoneypotSession)
     count_query = select(func.count(HoneypotSession.id))
 
     if status:
-        query = query.where(HoneypotSession.status == SessionStatus(status))
-        count_query = count_query.where(HoneypotSession.status == SessionStatus(status))
+        parsed = _parse_enum(SessionStatus, status, "status")
+        query = query.where(HoneypotSession.status == parsed)
+        count_query = count_query.where(HoneypotSession.status == parsed)
     if attack_category:
-        query = query.where(HoneypotSession.attack_category == AttackCategory(attack_category))
-        count_query = count_query.where(HoneypotSession.attack_category == AttackCategory(attack_category))
+        parsed = _parse_enum(AttackCategory, attack_category, "attack_category")
+        query = query.where(HoneypotSession.attack_category == parsed)
+        count_query = count_query.where(HoneypotSession.attack_category == parsed)
     if attacker_profile:
-        query = query.where(HoneypotSession.attacker_profile == AttackerProfile(attacker_profile))
-        count_query = count_query.where(HoneypotSession.attacker_profile == AttackerProfile(attacker_profile))
+        parsed = _parse_enum(
+            AttackerProfile, attacker_profile, "attacker_profile"
+        )
+        query = query.where(HoneypotSession.attacker_profile == parsed)
+        count_query = count_query.where(
+            HoneypotSession.attacker_profile == parsed
+        )
     if country:
         query = query.where(HoneypotSession.geo_country == country.upper())
         count_query = count_query.where(HoneypotSession.geo_country == country.upper())
     if ip_address:
-        query = query.where(HoneypotSession.attacker_ip.ilike(f"%{ip_address}%"))
-        count_query = count_query.where(HoneypotSession.attacker_ip.ilike(f"%{ip_address}%"))
+        pattern = f"%{_escape_like(ip_address)}%"
+        query = query.where(HoneypotSession.attacker_ip.ilike(pattern, escape="\\"))
+        count_query = count_query.where(
+            HoneypotSession.attacker_ip.ilike(pattern, escape="\\")
+        )
     if is_anomalous is not None:
         query = query.where(HoneypotSession.is_anomalous == is_anomalous)
         count_query = count_query.where(HoneypotSession.is_anomalous == is_anomalous)
     if search:
+        pattern = f"%{_escape_like(search)}%"
         search_filter = (
-            HoneypotSession.attacker_ip.ilike(f"%{search}%") |
-            HoneypotSession.session_uuid.ilike(f"%{search}%") |
-            (HoneypotSession.command_summary.ilike(f"%{search}%") if hasattr(HoneypotSession, 'command_summary') else False)
+            HoneypotSession.attacker_ip.ilike(pattern, escape="\\")
+            | HoneypotSession.session_uuid.ilike(pattern, escape="\\")
+            | HoneypotSession.command_summary.ilike(pattern, escape="\\")
         )
         query = query.where(search_filter)
         count_query = count_query.where(search_filter)
@@ -108,7 +127,7 @@ async def list_sessions(
     sessions = result.scalars().all()
 
     return SessionListResponse(
-        sessions=[HoneypotSessionResponse.from_orm(s) for s in sessions],
+        sessions=[HoneypotSessionResponse.from_model(s) for s in sessions],
         total=total,
         page=page,
         page_size=page_size,
@@ -125,7 +144,7 @@ async def get_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return HoneypotSessionResponse.from_orm(session)
+    return HoneypotSessionResponse.from_model(session)
 
 
 @router.get("/uuid/{session_uuid}", response_model=HoneypotSessionResponse)
@@ -138,7 +157,7 @@ async def get_session_by_uuid(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return HoneypotSessionResponse.from_orm(session)
+    return HoneypotSessionResponse.from_model(session)
 
 
 @router.post("/ingest")
@@ -146,7 +165,7 @@ async def ingest_session(
     session_data: dict,
     node_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("analyst")),
 ):
     node_result = await db.execute(select(HoneypotNode).where(HoneypotNode.id == node_id))
     node = node_result.scalar_one_or_none()
@@ -171,59 +190,23 @@ async def ingest_session(
 @router.post("/{session_id}/export")
 async def export_session(
     session_id: int,
-    format: str = Query("json", regex="^(json|cef|stix)$"),
+    format: str = Query("json", pattern="^(json|cef|stix)$"),
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("analyst")),
 ):
     result = await db.execute(select(HoneypotSession).where(HoneypotSession.id == session_id))
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session_data = {
-        "session_uuid": session.session_uuid,
-        "protocol": "ssh",
-        "attacker_ip": session.attacker_ip,
-        "attacker_port": session.attacker_port,
-        "geo": {
-            "country": session.geo_country,
-            "country_name": session.geo_country_name,
-            "city": session.geo_city,
-            "lat": session.geo_lat,
-            "lon": session.geo_lon,
+    content = _render(format, [session])
+    return Response(
+        content=content,
+        media_type=MEDIA_TYPES[format],
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="session_{session.session_uuid}'
+                f'.{FILE_EXTENSIONS[format]}"'
+            )
         },
-        "started_at": session.started_at.isoformat(),
-        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
-        "duration_seconds": session.duration_seconds,
-        "status": session.status.value,
-        "commands": [],
-        "uploads": session.uploaded_files or [],
-    }
-
-    analysis = {
-        "category": session.attack_category.value if session.attack_category else "unknown",
-        "confidence": session.attack_confidence,
-        "profile": session.attacker_profile.value if session.attacker_profile else "unknown",
-        "profile_confidence": 0.8,
-        "anomaly_score": session.anomaly_score,
-        "is_anomalous": session.is_anomalous,
-        "detected_tools": session.detected_tools or [],
-        "detected_intents": session.detected_intents or [],
-        "complexity_score": 0.5,
-        "command_count": 0,
-        "mitre": {
-            "tactics": session.mitre_tactics or [],
-            "techniques": session.mitre_techniques or [],
-        },
-        "iocs": [],
-    }
-
-    content = report_generator.generate_structured_report(session_data, analysis, format)
-    media_type = {
-        "json": "application/json",
-        "cef": "text/plain",
-        "stix": "application/json",
-    }.get(format, "application/json")
-
-    from fastapi.responses import Response
-    return Response(content=content, media_type=media_type)
+    )

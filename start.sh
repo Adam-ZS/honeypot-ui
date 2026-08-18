@@ -1,25 +1,33 @@
-#!/bin/bash
-echo "Starting HoneySentinel..."
+#!/usr/bin/env bash
+# Start the local development stack.
+set -euo pipefail
 
-cd /home/meowman/Desktop/honeypot-ui
+cd "$(dirname "$0")"
 
-echo "Starting Docker containers..."
-docker compose up -d
-
-echo "Starting ngrok tunnel..."
-setsid ngrok http 5173 --log=stdout > /tmp/ngrok-main.log 2>&1 &
-disown
-
-sleep 8
-URL=$(grep -o 'https://[^ ]*ngrok-free\.dev' /tmp/ngrok-main.log | head -1)
-
-if [ -z "$URL" ]; then
-    URL=$(grep -o 'https://[^ ]*ngrok-free\.app' /tmp/ngrok-main.log | head -1)
+if [ ! -f .env ]; then
+    echo "No .env found. Creating one from .env.example with generated secrets..."
+    cp .env.example .env
+    for key in SECRET_KEY ENCRYPTION_KEY HONEYPOT_INGEST_TOKEN; do
+        value=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+        # Portable in-place edit (BSD and GNU sed disagree on -i).
+        tmp=$(mktemp)
+        sed "s|^${key}=.*|${key}=${value}|" .env > "$tmp" && mv "$tmp" .env
+    done
+    echo "Generated secrets written to .env"
 fi
 
-echo ""
-echo "HoneySentinel is running!"
-echo "Dashboard: $URL"
-echo "API:       $URL/api/v1/docs"
-echo ""
+echo "Starting Docker containers..."
+docker compose up -d --build
+
+echo
+echo "HoneySentinel is running:"
+echo "  Dashboard : http://localhost:5173"
+echo "  API docs  : http://localhost:8000/docs"
+echo "  Health    : http://localhost:8000/health"
+echo
+echo "Emulated services (safe to probe):"
+echo "  SSH  : localhost:2222"
+echo "  FTP  : localhost:2121"
+echo "  HTTP : localhost:8080"
+echo
 echo "To stop: ./stop.sh"

@@ -1,13 +1,30 @@
+# Render blueprint for the HoneySentinel backend.
+#
+# The honeypot engine is intentionally NOT deployed here. Render's free web
+# services only expose a single HTTP port and terminate TLS in front of it, so
+# they cannot accept raw SSH/FTP connections on 2222/2121 - the engine would
+# start, bind ports nothing can reach, and fail its health check. Run the
+# engine on a host you control (see DEPLOY.md) and point it at this API.
+
+databases:
+  - name: honeysentinel-db
+    plan: free
+    databaseName: honeysentinel
+    user: honeypot
+
 services:
   - type: web
     name: honeysentinel-api
-    env: python
+    runtime: python
     region: oregon
     plan: free
+    healthCheckPath: /health
     buildCommand: |
       pip install -r backend/requirements.txt
       python -m spacy download en_core_web_sm
       mkdir -p backend/models backend/data
+      # Fit the bootstrap models at build time so the first request does not
+      # pay for training.
       python -c "
       import sys
       sys.path.insert(0, 'backend')
@@ -15,85 +32,59 @@ services:
       from app.ai.anomaly_detector import anomaly_detector
       classifier._ensure_loaded()
       anomaly_detector._ensure_loaded()
-      print('AI models initialized')
+      print('AI models initialised')
       "
     startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
     envVars:
       - key: PYTHON_VERSION
-        value: 3.12.0
+        value: "3.12.7"
+      - key: ENVIRONMENT
+        value: production
       - key: DATABASE_URL
         fromDatabase:
           name: honeysentinel-db
-          property: connectionStringInternal
+          property: connectionString
       - key: DATABASE_URL_SYNC
         fromDatabase:
           name: honeysentinel-db
-          property: connectionStringInternal
+          property: connectionString
       - key: SECRET_KEY
         generateValue: true
       - key: ENCRYPTION_KEY
         generateValue: true
+      # Must match HONEYPOT_INGEST_TOKEN on the machine running the engine.
+      # Copy the generated value out of the Render dashboard.
+      - key: HONEYPOT_INGEST_TOKEN
+        generateValue: true
+      # Comma-separated. Set this to your deployed frontend origin.
+      - key: CORS_ORIGINS
+        sync: false
+      # Render terminates TLS at its proxy, so client IPs arrive in
+      # X-Forwarded-For. Rate limiting is per-IP and needs this.
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
       - key: SPACY_MODEL
         value: en_core_web_sm
       - key: MODEL_PATH_RF
         value: ./models/random_forest_model.pkl
       - key: MODEL_PATH_IF
         value: ./models/isolation_forest_model.pkl
-      - key: SMTP_HOST
-        value: smtp.gmail.com
-      - key: SMTP_PORT
-        value: "587"
-      - key: SMTP_USER
-        value: ""
-      - key: SMTP_PASSWORD
-        value: ""
+      # Optional: MaxMind GeoLite2 database path. Without it sessions are
+      # stored with no location rather than a fabricated one.
+      - key: GEOIP_DB_PATH
+        value: ./data/GeoLite2-City.mmdb
+      # Optional alerting. Leave unset to disable.
       - key: ALERT_EMAIL_FROM
-        value: ""
-      - key: HONEYPOT_INGEST_TOKEN
-        generateValue: true
-
-  - type: web
-    name: honeysentinel-honeypot
-    env: python
-    region: oregon
-    plan: free
-    buildCommand: |
-      pip install -r honeypot/requirements.txt
-      mkdir -p honeypot/data/sessions honeypot/data/uploads honeypot/data/logs
-    startCommand: cd honeypot && python -m honeypot.main
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.0
-      - key: BACKEND_API_URL
-        fromService:
-          name: honeysentinel-api
-          type: pserv
-          property: host
-          envVarKey: BACKEND_HOST
-      - key: HONEYPOT_INGEST_TOKEN
-        fromService:
-          name: honeysentinel-api
-          type: pserv
-          property: envVar
-          envVarKey: HONEYPOT_INGEST_TOKEN
-      - key: HONEYPOT_BIND_ADDRESS
-        value: 0.0.0.0
-      - key: HONEYPOT_SSH_PORT
-        value: 2222
-      - key: HONEYPOT_FTP_PORT
-        value: 2121
-      - key: HONEYPOT_HTTP_PORT
-        value: 8080
-      - key: HONEYPOT_OPERATIONAL_MODE
-        value: active
-      - key: HONEYPOT_ANTI_FINGERPRINT
-        value: "true"
-      - key: HONEYPOT_ADAPTIVE_RESPONSE
-        value: "true"
-
-databases:
-  - name: honeysentinel-db
-    databaseName: honeysentinel
-    user: honeysentinel
-    plan: free
-    region: oregon
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false

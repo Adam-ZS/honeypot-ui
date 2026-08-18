@@ -1,8 +1,9 @@
 import asyncio
+import logging
 import random
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.database import async_session_factory, init_db
 from app.models import (
@@ -11,6 +12,11 @@ from app.models import (
     AttackCategory, AttackSeverity, AttackerProfile, AlertStatus,
 )
 from app.core.security import get_password_hash
+
+logger = logging.getLogger(__name__)
+
+#: Number of synthetic sessions the demo dataset contains.
+SESSION_COUNT = 150
 
 ATTACKER_IPS = [
     ("185.220.101.47", "RU", "Russia", "Moscow", 55.7558, 37.6173),
@@ -91,17 +97,37 @@ MITRE_TACTICS = {
 async def seed_database():
     from app.core.database import async_session_factory
     async with async_session_factory() as db:
-        existing = await db.execute(select(User).where(User.email == "admin@honeysentinel.io"))
+        import os as _os
+
+        seed_email = _os.environ.get("ADMIN_SEED_EMAIL", "admin@honeysentinel.io")
+        existing = await db.execute(select(User).where(User.email == seed_email))
         if existing.scalar_one_or_none():
-            print("Database already seeded.")
+            logger.info("Database already seeded; nothing to do.")
             return
 
-        import os, secrets
-        admin_pass = os.environ.get("ADMIN_SEED_PASSWORD", secrets.token_urlsafe(24))
-        print(f">>> SEED: admin@honeysentinel.io password = {admin_pass}", flush=True)
+        import os
+        import secrets
+
+        admin_email = os.environ.get("ADMIN_SEED_EMAIL", "admin@honeysentinel.io")
+        admin_pass = os.environ.get("ADMIN_SEED_PASSWORD")
+        generated = admin_pass is None
+        if generated:
+            admin_pass = secrets.token_urlsafe(24)
+            # Printed once, only because there is no other way to hand over a
+            # generated credential. Set ADMIN_SEED_PASSWORD to avoid writing a
+            # password to the application log at all.
+            print(
+                "\n" + "=" * 68
+                + f"\n  SEED ADMIN: {admin_email}"
+                + f"\n  PASSWORD  : {admin_pass}"
+                + "\n  Change this immediately and set ADMIN_SEED_PASSWORD"
+                + "\n  to suppress this output on future seeds."
+                + "\n" + "=" * 68 + "\n",
+                flush=True,
+            )
 
         admin = User(
-            email="admin@honeysentinel.io",
+            email=admin_email,
             hashed_password=get_password_hash(admin_pass),
             name="Security Admin",
             role=UserRole.ADMIN,
@@ -111,12 +137,18 @@ async def seed_database():
         db.add(admin)
         await db.flush()
 
+        # One node matching the name the engine registers itself under, so a
+        # locally-running engine attaches to it instead of creating a second.
+        # The Cowrie/Dionaea entries this used to create were fictional: no
+        # such collectors exist in this project.
         nodes = [
-            HoneypotNode(name="Honeypot-Engine-Main", protocol="multi", ip_address="0.0.0.0", port=0, mode=HoneypotMode.ACTIVE, location_lat=40.7128, location_lon=-74.0060),
-            HoneypotNode(name="Cowrie-SSH-01", protocol="ssh", ip_address="10.0.1.10", port=22, mode=HoneypotMode.ACTIVE, location_lat=40.7128, location_lon=-74.0060),
-            HoneypotNode(name="Cowrie-SSH-02", protocol="ssh", ip_address="10.0.1.11", port=22, mode=HoneypotMode.ACTIVE, location_lat=51.5074, location_lon=-0.1278),
-            HoneypotNode(name="Dionaea-HTTP-01", protocol="http", ip_address="10.0.2.10", port=80, mode=HoneypotMode.ACTIVE, location_lat=35.6762, location_lon=139.6503),
-            HoneypotNode(name="Dionaea-FTP-01", protocol="ftp", ip_address="10.0.2.11", port=21, mode=HoneypotMode.PASSIVE, location_lat=48.8566, location_lon=2.3522),
+            HoneypotNode(
+                name=os.environ.get("HONEYPOT_NODE_NAME", "honeypot-engine-main"),
+                protocol="multi",
+                ip_address="0.0.0.0",
+                port=2222,
+                mode=HoneypotMode.ACTIVE,
+            ),
         ]
         db.add_all(nodes)
         await db.flush()
@@ -134,7 +166,7 @@ async def seed_database():
 
         now = datetime.now(timezone.utc)
         sessions_data = []
-        for i in range(150):
+        for i in range(SESSION_COUNT):
             ip_info = random.choice(ATTACKER_IPS)
             attack = random.choice(ATTACK_TYPES)
             node = random.choice(nodes)
@@ -219,7 +251,23 @@ async def seed_database():
             db.add(ioc)
 
         await db.commit()
-        print(f"Seeded: 3 users, 4 honeypot nodes, 150 sessions, alerts, and IoCs")
+        # Report what was actually written. The previous message was a fixed
+        # string claiming "3 users, 4 honeypot nodes" regardless of the truth.
+        alert_count = (
+            await db.execute(select(func.count(Alert.id)))
+        ).scalar() or 0
+        ioc_count = (
+            await db.execute(select(func.count(IndicatorOfCompromise.id)))
+        ).scalar() or 0
+        logger.info(
+            "Seeded demo dataset: %d user(s), %d node(s), %d session(s), "
+            "%d alert(s), %d IoC(s)",
+            1,
+            len(nodes),
+            len(sessions_data),
+            alert_count,
+            ioc_count,
+        )
 
 
 if __name__ == "__main__":

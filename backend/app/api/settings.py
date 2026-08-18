@@ -13,6 +13,10 @@ from app.schemas import (
 router = APIRouter()
 
 
+def _to_response(t: AlertThreshold) -> AlertThresholdResponse:
+    return _to_response(t)
+
+
 @router.get("/thresholds", response_model=list[AlertThresholdResponse])
 async def list_thresholds(
     db: AsyncSession = Depends(get_db),
@@ -21,12 +25,7 @@ async def list_thresholds(
     result = await db.execute(select(AlertThreshold).order_by(AlertThreshold.name))
     thresholds = result.scalars().all()
     return [
-        AlertThresholdResponse(
-            id=t.id, name=t.name, min_severity=t.min_severity,
-            anomaly_score_threshold=t.anomaly_score_threshold,
-            email_enabled=t.email_enabled, webhook_enabled=t.webhook_enabled,
-            is_active=t.is_active, created_at=t.created_at, updated_at=t.updated_at,
-        )
+        _to_response(t)
         for t in thresholds
     ]
 
@@ -37,8 +36,19 @@ async def create_threshold(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_role("admin")),
 ):
+    existing = await db.execute(
+        select(AlertThreshold).where(AlertThreshold.name == threshold_data.name)
+    )
+    if existing.scalar_one_or_none():
+        # The column is unique; without this check the insert raised an
+        # IntegrityError that surfaced as a 500.
+        raise HTTPException(
+            status_code=409, detail="A threshold with that name already exists"
+        )
+
     threshold = AlertThreshold(**threshold_data.model_dump())
     db.add(threshold)
+    await db.flush()  # populate threshold.id for the audit row
 
     audit = AuditLog(
         user_id=current_user["id"],
@@ -50,12 +60,7 @@ async def create_threshold(
     await db.commit()
     await db.refresh(threshold)
 
-    return AlertThresholdResponse(
-        id=threshold.id, name=threshold.name, min_severity=threshold.min_severity,
-        anomaly_score_threshold=threshold.anomaly_score_threshold,
-        email_enabled=threshold.email_enabled, webhook_enabled=threshold.webhook_enabled,
-        is_active=threshold.is_active, created_at=threshold.created_at, updated_at=threshold.updated_at,
-    )
+    return _to_response(threshold)
 
 
 @router.patch("/thresholds/{threshold_id}", response_model=AlertThresholdResponse)
@@ -85,12 +90,7 @@ async def update_threshold(
     await db.commit()
     await db.refresh(threshold)
 
-    return AlertThresholdResponse(
-        id=threshold.id, name=threshold.name, min_severity=threshold.min_severity,
-        anomaly_score_threshold=threshold.anomaly_score_threshold,
-        email_enabled=threshold.email_enabled, webhook_enabled=threshold.webhook_enabled,
-        is_active=threshold.is_active, created_at=threshold.created_at, updated_at=threshold.updated_at,
-    )
+    return _to_response(threshold)
 
 
 @router.delete("/thresholds/{threshold_id}", status_code=204)
@@ -120,7 +120,7 @@ async def get_system_config(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    nodes_result = await db.execute(select(HoneypotNode).where(HoneypotNode.is_active == True))
+    nodes_result = await db.execute(select(HoneypotNode).where(HoneypotNode.is_active.is_(True)))
     nodes = nodes_result.scalars().all()
 
     modes = set(n.mode.value for n in nodes)
@@ -140,7 +140,7 @@ async def update_system_config(
     current_user: dict = Depends(require_role("admin")),
 ):
     if config.honeypot_mode:
-        mode = HoneypotMode(config.honeypot_mode)
+        mode = HoneypotMode(config.honeypot_mode.value)
         result = await db.execute(select(HoneypotNode))
         nodes = result.scalars().all()
         for node in nodes:
@@ -155,4 +155,8 @@ async def update_system_config(
         db.add(audit)
         await db.commit()
 
-    return {"status": "updated", "message": "System configuration updated"}
+    return {
+        "status": "updated",
+        "message": "System configuration updated",
+        "honeypot_mode": config.honeypot_mode.value if config.honeypot_mode else None,
+    }

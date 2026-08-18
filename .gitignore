@@ -37,3 +37,18 @@ backend/data/
 
 # Frontend
 *.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.pkl
+
+# Captured honeypot data (never commit attacker payloads)
+data/
+!data/.gitkeep
+
+# Editor swap files
+*.kate-swp
+*.swp

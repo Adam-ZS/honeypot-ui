@@ -1,3 +1,5 @@
+# The honeypot engine is the internet-facing component; its dependency
+# surface is kept deliberately minimal. httpx is used to ship captured
+# sessions to the backend, cryptography to serve the HTTPS emulator.
 httpx==0.28.1
-pydantic==2.10.3
-pydantic-settings==2.7.0
+cryptography==44.0.0

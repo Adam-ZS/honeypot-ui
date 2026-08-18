@@ -16,15 +16,39 @@ class EmulationProtocol(str, Enum):
     HTTPS = "https"
 
 
+def _mode_from_env() -> OperationalMode:
+    raw = os.getenv("HONEYPOT_OPERATIONAL_MODE", "active").strip().lower()
+    try:
+        return OperationalMode(raw)
+    except ValueError:
+        return OperationalMode.ACTIVE_EMULATION
+
+
+def _protocols_from_env() -> list["EmulationProtocol"]:
+    raw = os.getenv("HONEYPOT_PROTOCOLS", "ssh,ftp,http")
+    protocols = []
+    for name in raw.split(","):
+        name = name.strip().lower()
+        if not name:
+            continue
+        try:
+            protocols.append(EmulationProtocol(name))
+        except ValueError:
+            continue
+    return protocols or [
+        EmulationProtocol.SSH,
+        EmulationProtocol.FTP,
+        EmulationProtocol.HTTP,
+    ]
+
+
 @dataclass
 class HoneypotConfig:
-    operational_mode: OperationalMode = OperationalMode.ACTIVE_EMULATION
+    # HONEYPOT_OPERATIONAL_MODE was documented and set in docker-compose but
+    # never actually read, so the engine was always in active mode.
+    operational_mode: OperationalMode = field(default_factory=_mode_from_env)
     enabled_protocols: list[EmulationProtocol] = field(
-        default_factory=lambda: [
-            EmulationProtocol.SSH,
-            EmulationProtocol.FTP,
-            EmulationProtocol.HTTP,
-        ]
+        default_factory=_protocols_from_env
     )
 
     ssh_port: int = int(os.getenv("HONEYPOT_SSH_PORT", "2222"))
@@ -74,6 +98,13 @@ class HoneypotConfig:
     profile_update_interval: int = int(
         os.getenv("HONEYPOT_PROFILE_UPDATE", "60")
     )
+
+    # Management API. Bound separately from the emulators so it can be kept
+    # off the interface attackers reach.
+    control_bind_address: str = os.getenv("HONEYPOT_CONTROL_BIND", "0.0.0.0")
+    control_port: int = int(os.getenv("HONEYPOT_CONTROL_PORT", "8000"))
+
+    node_name: str = os.getenv("HONEYPOT_NODE_NAME", "honeypot-engine-main")
 
     backend_api_url: str = os.getenv(
         "BACKEND_API_URL", "http://backend:8000/api/v1"

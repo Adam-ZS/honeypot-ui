@@ -1,5 +1,6 @@
 import ipaddress
 import logging
+import os
 from typing import Optional
 
 from honeypot.core.config import config
@@ -9,13 +10,20 @@ logger = logging.getLogger(__name__)
 
 class EgressFilter:
     def __init__(self):
-        self._allowed_hosts: list[str] = config.allowed_egress_hosts
+        self._allowed_hosts: list[str] = list(config.allowed_egress_hosts)
+        # Only the loopback interface is allowed implicitly. Permitting every
+        # RFC1918 range would let a contained process reach the entire private
+        # network the host sits on, which is the opposite of egress filtering.
         self._allowed_networks: list[ipaddress.IPv4Network] = [
             ipaddress.IPv4Network("127.0.0.0/8"),
-            ipaddress.IPv4Network("10.0.0.0/8"),
-            ipaddress.IPv4Network("172.16.0.0/12"),
-            ipaddress.IPv4Network("192.168.0.0/16"),
         ]
+        for extra in os.getenv("HONEYPOT_EGRESS_NETWORKS", "").split(","):
+            extra = extra.strip()
+            if extra:
+                try:
+                    self._allowed_networks.append(ipaddress.IPv4Network(extra))
+                except ValueError:
+                    logger.warning(f"Ignoring invalid egress network: {extra}")
         self._blocked_networks: list[ipaddress.IPv4Network] = [
             ipaddress.IPv4Network("0.0.0.0/8"),
             ipaddress.IPv4Network("169.254.0.0/16"),
@@ -39,17 +47,15 @@ class EgressFilter:
 
         for allowed_host in self._allowed_hosts:
             try:
-                if ":" in allowed_host:
-                    host_part = allowed_host.rsplit(":", 1)[0]
-                else:
-                    host_part = allowed_host
+                host_part = allowed_host
+                if "://" in host_part:
+                    host_part = host_part.split("://", 1)[1]
+                host_part = host_part.split("/", 1)[0]
+                if ":" in host_part:
+                    host_part = host_part.rsplit(":", 1)[0]
 
                 if host_part == destination_ip:
                     return True
-
-                if not host_part.startswith("http"):
-                    if host_part == destination_ip:
-                        return True
             except Exception:
                 continue
 
@@ -59,6 +65,10 @@ class EgressFilter:
 
         self._log_denied(destination_ip, destination_port, "not_in_allowlist")
         return False
+
+    @property
+    def allowed_hosts(self) -> list[str]:
+        return list(self._allowed_hosts)
 
     def add_allowed_host(self, host: str):
         if host not in self._allowed_hosts:

@@ -1,4 +1,6 @@
+import html as html_escape
 import logging
+import os
 import smtplib
 import urllib.request
 import urllib.error
@@ -8,13 +10,6 @@ from email.mime.text import MIMEText
 
 from app.core.config import get_settings
 
-# Force IPv4 — Render containers fail on IPv6 routes
-import socket as _socket
-_orig_getaddrinfo = _socket.getaddrinfo
-def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
-    return _orig_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
-_socket.getaddrinfo = _ipv4_only
-
 logger = logging.getLogger(__name__)
 
 
@@ -23,12 +18,11 @@ class EmailService:
         self._settings = get_settings()
 
     def _send_via_sendgrid(self, to_email: str, subject: str, html: str, text: str) -> bool:
-        import os
         api_key = os.environ.get("SENDGRID_API_KEY", "")
         if not api_key:
             return False
 
-        from_email = os.environ.get("ALERT_EMAIL_FROM", "honeysentinel1@gmail.com")
+        from_email = self._settings.ALERT_EMAIL_FROM
 
         payload = json.dumps({
             "personalizations": [{"to": [{"email": to_email}]}],
@@ -51,24 +45,23 @@ class EmailService:
         )
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
-                print(f">>> SENDGRID response: {resp.status}", flush=True)
                 return resp.status == 202
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            print(f">>> SENDGRID HTTP ERROR {e.code}: {body}", flush=True)
+        except urllib.error.HTTPError as exc:
+            logger.warning(
+                "Email provider rejected the message: HTTP %s", exc.code
+            )
             return False
-        except Exception as e:
-            print(f">>> SENDGRID FAILED: {type(e).__name__}: {e}", flush=True)
+        except Exception as exc:
+            logger.warning("Email provider request failed: %s", exc)
             return False
 
 
     def _send_via_brevo(self, to_email: str, subject: str, html: str, text: str) -> bool:
-        import os
         api_key = os.environ.get("BREVO_API_KEY", "")
         if not api_key:
             return False
 
-        from_email = os.environ.get("ALERT_EMAIL_FROM", "honeysentinel1@gmail.com")
+        from_email = self._settings.ALERT_EMAIL_FROM
 
         payload = json.dumps({
             "sender": {"name": "HoneySentinel AI", "email": from_email},
@@ -89,22 +82,21 @@ class EmailService:
         )
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
-                print(f">>> BREVO response: {resp.status}", flush=True)
                 return resp.status == 201
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            print(f">>> BREVO HTTP ERROR {e.code}: {body}", flush=True)
+        except urllib.error.HTTPError as exc:
+            logger.warning(
+                "Email provider rejected the message: HTTP %s", exc.code
+            )
             return False
-        except Exception as e:
-            print(f">>> BREVO FAILED: {type(e).__name__}: {e}", flush=True)
+        except Exception as exc:
+            logger.warning("Email provider request failed: %s", exc)
             return False
     def _send_via_resend(self, to_email: str, subject: str, html: str, text: str) -> bool:
-        import os
         api_key = os.environ.get("RESEND_API_KEY", "")
         if not api_key:
             return False
 
-        from_addr = os.environ.get("ALERT_EMAIL_FROM", "onboarding@resend.dev")
+        from_addr = self._settings.ALERT_EMAIL_FROM or "onboarding@resend.dev"
 
         payload = json.dumps({
             "from": f"HoneySentinel AI <{from_addr}>",
@@ -126,21 +118,22 @@ class EmailService:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 return resp.status in (200, 201)
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            print(f">>> RESEND HTTP ERROR {e.code}: {body}", flush=True)
+        except urllib.error.HTTPError as exc:
+            logger.warning(
+                "Email provider rejected the message: HTTP %s", exc.code
+            )
             return False
-        except Exception as e:
-            print(f">>> RESEND FAILED: {type(e).__name__}: {e}", flush=True)
+        except Exception as exc:
+            logger.warning("Email provider request failed: %s", exc)
             return False
 
     def _send_via_smtp(self, to_email: str, subject: str, html: str, text: str) -> bool:
-        import os
         import ssl
-        smtp_user = os.environ.get("SMTP_USER", "")
-        smtp_password = os.environ.get("SMTP_PASSWORD", "")
-        smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-        from_addr = os.environ.get("ALERT_EMAIL_FROM", "") or smtp_user
+
+        smtp_user = self._settings.SMTP_USER
+        smtp_password = self._settings.SMTP_PASSWORD
+        smtp_host = self._settings.SMTP_HOST
+        from_addr = self._settings.ALERT_EMAIL_FROM or smtp_user
 
         if not smtp_user or not smtp_password:
             return False
@@ -158,10 +151,9 @@ class EmailService:
             with smtplib.SMTP_SSL(smtp_host, 465, context=context, timeout=15) as server:
                 server.login(smtp_user, smtp_password)
                 server.sendmail(from_addr, [to_email], msg.as_string())
-            print(f">>> SMTP SSL (465) email sent to {to_email}", flush=True)
             return True
-        except Exception as e1:
-            print(f">>> SMTP SSL (465) FAILED: {type(e1).__name__}: {e1}", flush=True)
+        except Exception as exc:
+            logger.warning("SMTP over 465 failed: %s", exc)
 
         # Fall back to port 587 (STARTTLS)
         try:
@@ -169,30 +161,29 @@ class EmailService:
                 server.starttls()
                 server.login(smtp_user, smtp_password)
                 server.sendmail(from_addr, [to_email], msg.as_string())
-            print(f">>> SMTP STARTTLS (587) email sent to {to_email}", flush=True)
             return True
-        except Exception as e2:
-            print(f">>> SMTP STARTTLS (587) FAILED: {type(e2).__name__}: {e2}", flush=True)
+        except Exception as exc:
+            logger.warning("SMTP STARTTLS over 587 failed: %s", exc)
             return False
 
     def _send(self, to_email: str, subject: str, html: str, text: str) -> bool:
-        import os
-        print(f">>> EMAIL _send called to={to_email} brevo={bool(os.environ.get('BREVO_API_KEY'))} sendgrid={bool(os.environ.get('SENDGRID_API_KEY'))} resend={bool(os.environ.get('RESEND_API_KEY'))} smtp={os.environ.get('SMTP_USER','NOT SET')!r}", flush=True)
 
-        if self._send_via_brevo(to_email, subject, html, text):
-            print(f">>> Email sent via Brevo to {to_email}", flush=True)
-            return True
-        if self._send_via_sendgrid(to_email, subject, html, text):
-            print(f">>> Email sent via SendGrid to {to_email}", flush=True)
-            return True
-        if self._send_via_resend(to_email, subject, html, text):
-            print(f">>> Email sent via Resend to {to_email}", flush=True)
-            return True
-        if self._send_via_smtp(to_email, subject, html, text):
-            return True
+        providers = (
+            ("Brevo", self._send_via_brevo),
+            ("SendGrid", self._send_via_sendgrid),
+            ("Resend", self._send_via_resend),
+            ("SMTP", self._send_via_smtp),
+        )
+        for name, send in providers:
+            if send(to_email, subject, html, text):
+                logger.info("Email delivered via %s", name)
+                return True
 
-        print(f">>> WARNING: No email provider worked for {to_email}", flush=True)
-        return True  # Don't fail registration if email fails
+        # Returning True here (the previous behaviour) told the caller the
+        # code had been delivered when nothing had been sent, so users waited
+        # for an email that was never going to arrive.
+        logger.error("No email provider accepted the message")
+        return False
 
     def send_otp_email(self, to_email: str, otp_code: str, user_name: str = "") -> bool:
         subject = "HoneySentinel AI — Email Verification Code"
@@ -217,6 +208,7 @@ class EmailService:
         return self._send(to_email, subject, html, text)
 
     def _build_otp_html(self, otp_code: str, user_name: str) -> str:
+        user_name = html_escape.escape(user_name)
         return f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8">
@@ -250,6 +242,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 </body></html>"""
 
     def _build_reset_html(self, otp_code: str, user_name: str) -> str:
+        user_name = html_escape.escape(user_name)
         return f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8">

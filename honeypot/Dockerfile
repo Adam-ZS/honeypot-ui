@@ -1,22 +1,25 @@
+# Build context is the repository root so `honeypot` stays an importable
+# package. Building from ./honeypot copied the package *contents* to /app,
+# which made `python -m honeypot.main` fail with "No module named honeypot".
 FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    iptables \
-    iproute2 \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
+COPY honeypot/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY honeypot ./honeypot
 
-RUN mkdir -p data/sessions data/uploads data/logs
+RUN mkdir -p /app/data/sessions /app/data/uploads /app/data/logs \
+    && useradd --system --uid 10001 --no-create-home honeypot \
+    && chown -R honeypot:honeypot /app/data
 
-ENV HONEYPOT_CONTAINER=true
-ENV HONEYPOT_BIND_ADDRESS=0.0.0.0
+# The emulators bind ports above 1024, so root is never needed.
+USER honeypot
+
+ENV HONEYPOT_CONTAINER=true \
+    HONEYPOT_BIND_ADDRESS=0.0.0.0 \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 2222 2121 8080 8443
 

@@ -1,63 +1,83 @@
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
-import { api } from "../services/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AuthContext } from './authContext.js'
+import {
+  api,
+  clearTokens,
+  getAccessToken,
+  setTokens,
+  setUnauthorizedHandler,
+} from '../services/api'
 
-const AuthContext = createContext(null);
+const ROLE_RANK = { viewer: 0, analyst: 1, admin: 2 }
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const mounted = useRef(true)
+
+  const logout = useCallback(() => {
+    clearTokens()
+    setUser(null)
+  }, [])
 
   const fetchUser = useCallback(async () => {
-    const token = localStorage.getItem("access_token");
-    if (!token) {
-      setUser(null);
-      setLoading(false);
-      return;
+    if (!getAccessToken()) {
+      if (mounted.current) {
+        setUser(null)
+        setLoading(false)
+      }
+      return
     }
     try {
-      const data = await api.auth.me();
-      setUser(data);
+      const me = await api.auth.me()
+      if (mounted.current) setUser(me)
     } catch {
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("refresh_token");
-      setUser(null);
+      clearTokens()
+      if (mounted.current) setUser(null)
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false)
     }
-  }, []);
+  }, [])
 
   useEffect(() => {
-    fetchUser();
-  }, [fetchUser]);
+    mounted.current = true
+    // Let the API layer return us to the login screen through React state
+    // rather than a full-page window.location reload.
+    setUnauthorizedHandler(() => {
+      if (mounted.current) setUser(null)
+    })
+    const timer = setTimeout(fetchUser, 0)
 
-  const login = async (email, password) => {
-    const data = await api.auth.login(email, password);
-    localStorage.setItem("access_token", data.access_token);
-    localStorage.setItem("refresh_token", data.refresh_token);
-    await fetchUser();
-    return data;
-  };
+    return () => {
+      mounted.current = false
+      clearTimeout(timer)
+      setUnauthorizedHandler(() => {})
+    }
+  }, [fetchUser])
 
-  const register = async (userData) => {
-    const result = await api.auth.register(userData);
-    return result;
-  };
+  const login = useCallback(
+    async (email, password) => {
+      const data = await api.auth.login(email, password)
+      setTokens(data)
+      await fetchUser()
+      return data
+    },
+    [fetchUser],
+  )
 
-  const logout = () => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-    setUser(null);
-  };
+  const value = useMemo(
+    () => ({
+      user,
+      loading,
+      login,
+      logout,
+      register: api.auth.register,
+      /** True when the signed-in user meets or exceeds `role`. */
+      hasRole: (role) =>
+        (ROLE_RANK[user?.role] ?? -1) >= (ROLE_RANK[role] ?? Infinity),
+    }),
+    [user, loading, login, logout],
+  )
 
-  return (
-    <AuthContext.Provider value={{ user, login, register, logout, loading }}>
-      {children}
-    </AuthContext.Provider>
-  );
-}
-
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
-  return ctx;
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

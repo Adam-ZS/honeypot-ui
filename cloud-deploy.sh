@@ -1,45 +1,54 @@
-#!/bin/bash
-echo "========================================="
-echo "  HoneySentinel — Cloud Deploy Helper"
-echo "========================================="
-echo ""
+#!/usr/bin/env bash
+# Pre-flight check before deploying. Verifies the repository is in a
+# deployable state and prints the remaining manual steps.
+set -euo pipefail
 
-# Check if git is initialized
-if [ ! -d ".git" ]; then
-    echo "Initializing git repository..."
-    git init
-    git add .
-    git commit -m "Initial commit"
-    echo ""
-    echo "Now push to GitHub:"
-    echo "  git remote add origin https://github.com/YOUR_USERNAME/honeypot-ui.git"
-    echo "  git push -u origin main"
-    echo ""
+cd "$(dirname "$0")"
+
+fail=0
+say() { printf '%s\n' "$*"; }
+check() { if eval "$2" >/dev/null 2>&1; then say "  [ok]   $1"; else say "  [FAIL] $1"; fail=1; fi; }
+
+say "HoneySentinel — deployment pre-flight"
+say
+
+say "Repository:"
+check "git repository initialised" "[ -d .git ]"
+check "a remote named 'origin' exists" "git remote get-url origin"
+check "no uncommitted changes" "[ -z \"\$(git status --porcelain)\" ]"
+check ".env is not tracked by git" "! git ls-files --error-unmatch .env"
+
+say
+say "Required files:"
+for f in render.yaml vercel.json backend/requirements.txt honeypot/requirements.txt package.json; do
+    check "$f present" "[ -f $f ]"
+done
+
+say
+say "Build:"
+check "frontend dependencies installed" "[ -d node_modules ]"
+if [ -d node_modules ]; then
+    check "frontend builds" "npm run build"
+    check "frontend lints clean" "npm run lint"
 fi
 
-# Check if on GitHub
-if git remote -v | grep -q github; then
-    REPO_URL=$(git remote get-url origin | sed 's/\.git$//')
-    echo "Repository: $REPO_URL"
-    echo ""
-    echo "Step 1: Create Neon database"
-    echo "  → https://neon.tech"
-    echo "  → Copy connection string"
-    echo ""
-    echo "Step 2: Deploy to Render"
-    echo "  → https://render.com"
-    echo "  → New + → Blueprint → Connect this repo"
-    echo "  → Set DATABASE_URL to your Neon URL"
-    echo ""
-    echo "Step 3: Deploy frontend to Vercel"
-    echo "  → https://vercel.com"
-    echo "  → New Project → Import this repo"
-    echo "  → Set VITE_API_URL to your Render API URL"
-    echo ""
-    echo "Step 4: Seed database"
-    echo "  → Render Dashboard → Shell → Run seed script"
-    echo ""
-    echo "See DEPLOY.md for detailed instructions."
-else
-    echo "Push your code to GitHub first, then run this script again."
+say
+if [ "$fail" -ne 0 ]; then
+    say "Pre-flight FAILED. Fix the items above before deploying."
+    exit 1
 fi
+
+say "Pre-flight passed."
+say
+say "Remaining manual steps:"
+say "  1. Render : New + -> Blueprint -> select this repository."
+say "             Fill in CORS_ORIGINS; copy the generated"
+say "             HONEYPOT_INGEST_TOKEN out of the dashboard."
+say "  2. Vercel : New Project -> import this repository."
+say "             Set VITE_API_URL to your Render API URL + /api/v1."
+say "  3. Backend: add the Vercel origin to CORS_ORIGINS."
+say "  4. Engine : on your own VPS, set BACKEND_API_URL and the same"
+say "             HONEYPOT_INGEST_TOKEN, then:"
+say "               docker compose up -d --build honeypot"
+say
+say "Full walkthrough: DEPLOY.md"

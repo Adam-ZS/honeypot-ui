@@ -19,6 +19,7 @@ ANOMALY_FEATURES = [
 class AnomalyDetector:
     def __init__(self):
         self.model: Optional[IsolationForest] = None
+        self.model_source = "unloaded"
         self._loaded = False
 
     def _ensure_loaded(self):
@@ -28,11 +29,18 @@ class AnomalyDetector:
         if os.path.exists(model_path):
             with open(model_path, "rb") as f:
                 self.model = pickle.load(f)
+            self.model_source = "pretrained"
         else:
             self._train_default_model()
+            self.model_source = "synthetic"
         self._loaded = True
 
     def _train_default_model(self):
+        """Fit a bootstrap detector on synthetic feature vectors.
+
+        Not trained on real captures; scores are relative, not calibrated.
+        Results carry ``model_source: synthetic`` so callers can say so.
+        """
         np.random.seed(42)
         n_normal = 5000
         n_features = len(ANOMALY_FEATURES)
@@ -71,10 +79,11 @@ class AnomalyDetector:
         normalized_score = min(max(anomaly_score / 1.5, 0), 1)
 
         return {
-            "is_anomalous": prediction == -1,
+            "is_anomalous": bool(prediction == -1),
             "anomaly_score": round(normalized_score, 4),
             "raw_score": round(float(score), 4),
             "threshold": 0.6,
+            "model_source": self.model_source,
         }
 
     def detect_batch(self, sessions_features: List[Dict]) -> List[Dict]:
@@ -95,7 +104,7 @@ class AnomalyDetector:
             anomaly_score = float(-score)
             normalized_score = min(max(anomaly_score / 1.5, 0), 1)
             results.append({
-                "is_anomalous": pred == -1,
+                "is_anomalous": bool(pred == -1),
                 "anomaly_score": round(normalized_score, 4),
                 "raw_score": round(float(score), 4),
             })
