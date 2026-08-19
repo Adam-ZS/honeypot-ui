@@ -1,4 +1,8 @@
-fastapi==0.115.6
+# 0.115.x mis-detects Pydantic body parameters as query parameters when
+# resolved against typing_extensions >= 4.15, which turns every POST route
+# (login included) into a 422. Do not downgrade without re-running the
+# test suite against a fresh environment.
+fastapi==0.141.1
 uvicorn[standard]==0.34.0
 sqlalchemy==2.0.36
 alembic==1.14.0

@@ -22,12 +22,16 @@ services:
     buildCommand: |
       pip install -r backend/requirements.txt
       python -m spacy download en_core_web_sm
-      mkdir -p backend/models backend/data
+      # Everything below runs from backend/, matching startCommand's working
+      # directory. MODEL_PATH_RF is relative, so building from the repository
+      # root wrote the fitted models to <root>/models while the server looked
+      # in <root>/backend/models - the artefacts were never found and every
+      # cold start refitted them.
+      cd backend
+      mkdir -p models data
       # Fit the bootstrap models at build time so the first request does not
       # pay for training.
       python -c "
-      import sys
-      sys.path.insert(0, 'backend')
       from app.ai.classifier import classifier
       from app.ai.anomaly_detector import anomaly_detector
       classifier._ensure_loaded()
