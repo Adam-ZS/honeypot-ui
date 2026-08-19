@@ -269,3 +269,46 @@ class TestNLPEngine:
 
         result = nlp_engine.analyze_payload("${jndi:ldap://x/a} union select")
         assert 0.0 <= result["suspicion_score"] <= 1.0
+
+
+class TestSettingsParsing:
+    """CORS_ORIGINS arrives as a comma-separated environment variable.
+
+    pydantic-settings classifies List[str] as a complex type and runs
+    json.loads on the raw value before any validator runs, so the documented
+    comma-separated form raised SettingsError at import and the process died
+    during startup:
+
+        pydantic_settings.sources.SettingsError: error parsing value for
+        field "CORS_ORIGINS" from source "EnvSettingsSource"
+
+    The field is annotated with NoDecode so _split_origins receives the raw
+    string. These run in-process because the failure is at Settings
+    construction, before anything else can be exercised.
+    """
+
+    @staticmethod
+    def _settings(value):
+        import os
+        from unittest import mock
+
+        from app.core.config import Settings
+
+        with mock.patch.dict(os.environ, {"CORS_ORIGINS": value}, clear=False):
+            return Settings()
+
+    def test_single_origin(self):
+        settings = self._settings("https://example.vercel.app")
+        assert settings.CORS_ORIGINS == ["https://example.vercel.app"]
+
+    def test_comma_separated_origins(self):
+        settings = self._settings("https://a.example, https://b.example")
+        assert settings.CORS_ORIGINS == ["https://a.example", "https://b.example"]
+
+    def test_empty_value_yields_no_origins(self):
+        assert self._settings("").CORS_ORIGINS == []
+
+    def test_json_list_is_still_accepted(self):
+        """The JSON form worked before NoDecode; it must keep working."""
+        settings = self._settings('["https://a.example","https://b.example"]')
+        assert settings.CORS_ORIGINS == ["https://a.example", "https://b.example"]

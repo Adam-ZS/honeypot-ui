@@ -1,10 +1,10 @@
 import os
 import secrets
 from functools import lru_cache
-from typing import List
+from typing import Annotated, List
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, NoDecode
 
 #: Values shipped in .env.example / docker-compose. Never acceptable in a
 #: deployment that is reachable from anywhere but localhost.
@@ -43,7 +43,16 @@ class Settings(BaseSettings):
     HONEYPOT_INGEST_TOKEN: str = ""
 
     # CORS. Comma-separated in the environment.
-    CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
+    #
+    # NoDecode is required: pydantic-settings classifies List[str] as a complex
+    # type and runs json.loads on the raw environment value *before* any
+    # validator sees it, so a comma-separated string raised
+    # SettingsError/JSONDecodeError and the process died at import. NoDecode
+    # suppresses that step and hands the raw string to _split_origins below.
+    CORS_ORIGINS: Annotated[List[str], NoDecode] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ]
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
@@ -84,9 +93,26 @@ class Settings(BaseSettings):
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def _split_origins(cls, value):
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+        """Accept a comma-separated list or a JSON array.
+
+        NoDecode suppresses pydantic-settings' own JSON decoding, so a value
+        that really is JSON has to be handled here or it would be split on its
+        commas into fragments like '["https://a.example"'.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if text.startswith("["):
+            import json
+
+            try:
+                decoded = json.loads(text)
+            except ValueError:
+                pass
+            else:
+                if isinstance(decoded, list):
+                    return [str(item).strip() for item in decoded if str(item).strip()]
+        return [item.strip() for item in text.split(",") if item.strip()]
 
     @field_validator("DATABASE_URL", mode="after")
     @classmethod
