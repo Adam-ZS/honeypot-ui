@@ -101,6 +101,8 @@ class UserRoleUpdate(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+    # Optional: only required once the account has enrolled an authenticator.
+    totp_code: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -126,6 +128,12 @@ class OTPVerifyRequest(BaseModel):
 class OTPResendRequest(BaseModel):
     email: EmailStr
     purpose: str = "email_verification"
+
+
+class MFACodeRequest(BaseModel):
+    """A six-digit authenticator code, or a single-use recovery code."""
+
+    code: str = Field(..., min_length=6, max_length=32)
 
 
 class PasswordResetRequest(BaseModel):

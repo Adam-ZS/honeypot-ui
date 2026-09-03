@@ -94,6 +94,14 @@ class User(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     last_login = Column(DateTime(timezone=True), nullable=True)
 
+    # TOTP second factor. The secret is encrypted at rest with the same
+    # AES-256-GCM used for captured commands; recovery codes are hashed,
+    # because both are password-equivalent if the database is read.
+    totp_secret_encrypted = Column(Text, nullable=True)
+    totp_enabled = Column(Boolean, default=False, nullable=False)
+    totp_recovery_hashes = Column(JSONB, nullable=True)
+    totp_enrolled_at = Column(DateTime(timezone=True), nullable=True)
+
     alerts = relationship("Alert", back_populates="user", foreign_keys="Alert.assigned_to_id")
     audit_logs = relationship("AuditLog", back_populates="user")
     otp_verifications = relationship(

@@ -25,6 +25,7 @@ from app.core.security import (
 from app.models import AuditLog, User, UserRole
 from app.schemas import (
     AdminUserCreate,
+    MFACodeRequest,
     OTPResendRequest,
     OTPVerifyRequest,
     PasswordResetConfirm,
@@ -37,6 +38,8 @@ from app.schemas import (
     UserResponse,
     UserRoleUpdate,
 )
+from app.core import totp
+from app.core.encryption import decrypt_data, encrypt_data
 from app.services.otp import otp_service
 
 logger = logging.getLogger(__name__)
@@ -280,6 +283,28 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
 
+    # Second factor, when enrolled. Checked after the password so an attacker
+    # cannot use this response to discover which accounts have MFA on.
+    if user.totp_enabled:
+        if not credentials.totp_code:
+            raise HTTPException(
+                status_code=401,
+                detail="Authenticator code required",
+                headers={"X-MFA-Required": "totp"},
+            )
+        if not _verify_second_factor(user, credentials.totp_code):
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="mfa_failed",
+                    resource_type="user",
+                    resource_id=user.id,
+                    ip_address=_client_ip(request),
+                )
+            )
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid authenticator code")
+
     # Transparently upgrade hashes stored with weaker parameters.
     if needs_rehash(user.hashed_password):
         user.hashed_password = get_password_hash(credentials.password)
@@ -297,6 +322,132 @@ async def login(
     await db.commit()
 
     return _token_pair(user)
+
+
+def _verify_second_factor(user: User, code: str) -> bool:
+    """Accept a TOTP code, or burn a single-use recovery code.
+
+    Recovery codes are consumed on use: a reusable one is a permanent
+    password-equivalent credential sitting in the user's notes app.
+    """
+    code = (code or "").strip()
+
+    if user.totp_secret_encrypted:
+        try:
+            secret = decrypt_data(user.totp_secret_encrypted)
+        except ValueError:
+            logger.error("TOTP secret for user %s could not be decrypted", user.id)
+            secret = ""
+        if secret and totp.verify(secret, code):
+            return True
+
+    remaining = list(user.totp_recovery_hashes or [])
+    normalised = code.lower().replace(" ", "")
+    for stored in remaining:
+        if verify_password(normalised, stored):
+            remaining.remove(stored)
+            user.totp_recovery_hashes = remaining
+            return True
+    return False
+
+
+@router.post("/mfa/enroll")
+@limiter.limit("5/minute")
+async def enroll_mfa(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Begin enrolment: issue a secret and the QR payload for it.
+
+    Not enabled yet — the user must prove they can generate a code first, or
+    a mistyped setup would lock them out of their own account.
+    """
+    user = (
+        await db.execute(select(User).where(User.id == int(current_user["sub"])))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.totp_enabled:
+        raise HTTPException(status_code=409, detail="Authenticator already enrolled")
+
+    secret = totp.generate_secret()
+    user.totp_secret_encrypted = encrypt_data(secret)
+    await db.commit()
+
+    return {
+        "secret": secret,
+        "otpauth_uri": totp.provisioning_uri(secret, user.email),
+        "next": "Scan this in an authenticator app, then POST the code to /auth/mfa/confirm",
+    }
+
+
+@router.post("/mfa/confirm")
+@limiter.limit("10/minute")
+async def confirm_mfa(
+    request: Request,
+    data: MFACodeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Turn MFA on, once a working code proves the app is set up."""
+    user = (
+        await db.execute(select(User).where(User.id == int(current_user["sub"])))
+    ).scalar_one_or_none()
+    if user is None or not user.totp_secret_encrypted:
+        raise HTTPException(status_code=400, detail="Start enrolment first")
+
+    if not totp.verify(decrypt_data(user.totp_secret_encrypted), data.code):
+        raise HTTPException(status_code=401, detail="That code did not match")
+
+    codes = totp.generate_recovery_codes()
+    user.totp_recovery_hashes = [get_password_hash(c) for c in codes]
+    user.totp_enabled = True
+    user.totp_enrolled_at = datetime.now(timezone.utc)
+    db.add(
+        AuditLog(user_id=user.id, action="mfa_enabled", resource_type="user",
+                 resource_id=user.id, ip_address=_client_ip(request))
+    )
+    await db.commit()
+
+    # Shown exactly once. Password reset depends on email, and email is not
+    # configured here, so losing both the app and these codes means losing
+    # the account.
+    return {
+        "enabled": True,
+        "recovery_codes": codes,
+        "warning": "Store these now. They are shown once and each works only once.",
+    }
+
+
+@router.post("/mfa/disable")
+@limiter.limit("5/minute")
+async def disable_mfa(
+    request: Request,
+    data: MFACodeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Turn MFA off. Requires a current code, not just a session."""
+    user = (
+        await db.execute(select(User).where(User.id == int(current_user["sub"])))
+    ).scalar_one_or_none()
+    if user is None or not user.totp_enabled:
+        raise HTTPException(status_code=400, detail="Authenticator is not enabled")
+
+    if not _verify_second_factor(user, data.code):
+        raise HTTPException(status_code=401, detail="That code did not match")
+
+    user.totp_enabled = False
+    user.totp_secret_encrypted = None
+    user.totp_recovery_hashes = None
+    user.totp_enrolled_at = None
+    db.add(
+        AuditLog(user_id=user.id, action="mfa_disabled", resource_type="user",
+                 resource_id=user.id, ip_address=_client_ip(request))
+    )
+    await db.commit()
+    return {"enabled": False}
 
 
 @router.post("/refresh", response_model=Token)
