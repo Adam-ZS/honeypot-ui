@@ -342,3 +342,22 @@ def test_enum_columns_persist_values_not_names():
             checked += 1
 
     assert checked >= 8, f"expected to check every enum column, saw {checked}"
+
+
+def test_training_features_match_the_classifier():
+    """The trainer and the classifier must agree on the feature vector.
+
+    If these drift, the model is trained on one meaning of position N and
+    applied to another. Nothing in the metrics would reveal it — the model
+    would score well on its own split and be nonsense in production — so it is
+    asserted here instead.
+    """
+    from app.ai.classifier import FeatureExtractor
+    from ml import cicids
+
+    assert cicids.FEATURES == FeatureExtractor.CICIDS_FEATURES
+    assert set(cicids.SCALES) == set(FeatureExtractor.FEATURE_SCALES)
+    for name, scale in cicids.SCALES.items():
+        assert scale == FeatureExtractor.FEATURE_SCALES[name], (
+            f"{name} is normalised differently during training and inference"
+        )
