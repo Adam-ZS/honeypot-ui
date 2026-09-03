@@ -1,8 +1,33 @@
+"""SSH emulator, speaking the real protocol.
+
+This used to write a plaintext ``login as: `` prompt straight onto the socket
+after exchanging version strings. That is a telnet conversation wearing an SSH
+banner: a real client sends its identification string and then immediately
+begins the binary key exchange, so the previous implementation read
+``SSH_MSG_KEXINIT`` bytes as a username and hung. Nothing but ``nc`` could
+drive it, which meant FR-1's "realistic SSH interactive access patterns" was
+unmet for the one protocol the project leads with.
+
+asyncssh terminates the transport properly — key exchange, encryption, the
+binary packet protocol, and the userauth service — so ordinary ``ssh``, ``scp``
+and automated scanners all connect. What they then talk to is still an
+emulation: no command is executed, no shell is spawned, and every response
+comes from the canned-response layer in ``core/modes.py``.
+
+The dependency is worth its weight here. The engine's requirements are
+otherwise deliberately tiny, but there is no way to speak SSH without
+implementing the transport, and a hand-rolled one on the internet-facing
+component would be a far worse trade than a maintained library.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import logging
-import random
-import time
+import os
 from typing import Optional
+
+import asyncssh
 
 from honeypot.core.config import config
 from honeypot.core.session import session_manager
@@ -13,186 +38,303 @@ from honeypot.adaptive.response import adaptive_engine
 
 logger = logging.getLogger(__name__)
 
+#: Credentials the decoy accepts. Weak on purpose — the point is to let an
+#: attacker in and record what they do next.
+FAKE_USERS = {
+    "root": "root",
+    "admin": "admin",
+    "user": "password",
+    "test": "test",
+    "ubuntu": "ubuntu",
+    "pi": "raspberry",
+    "oracle": "oracle",
+    "postgres": "postgres",
+}
 
-class SSHSessionState:
-    def __init__(self):
+MAX_COMMAND_LENGTH = 4096
+MAX_AUTH_ATTEMPTS = 6
+
+#: Attempts after which any password is accepted, so a brute-forcer that
+#: never guesses the advertised credential still gets in and reveals what it
+#: does next. Instant success on attempt one is a fingerprint.
+SOFT_ACCEPT_AFTER = 3
+
+#: Failed attempts per source address, not per connection. Most brute-force
+#: tools open a fresh connection for every password, so a per-connection
+#: counter would never reach the threshold and the soft accept above would be
+#: dead code. Bounded so a long scan cannot grow it without limit.
+_failures_by_ip: dict[str, int] = {}
+_MAX_TRACKED_IPS = 4096
+
+
+class _SessionState:
+    def __init__(self) -> None:
+        self.session_id: Optional[str] = None
         self.username: Optional[str] = None
-        self.password: Optional[str] = None
         self.authenticated = False
-        self.cwd = "/home/user"
         self.is_root = False
-        self.env_vars: dict = {}
-        self.command_buffer = ""
+        self.cwd = "/home/user"
+        self.auth_attempts = 0
+
+
+class _HoneypotSSHServer(asyncssh.SSHServer):
+    """Per-connection handler: capture the peer, then the auth attempts."""
+
+    def __init__(self, emulator: "SSHHoneypot") -> None:
+        self._emulator = emulator
+        self.state = _SessionState()
+        self.source_ip = "0.0.0.0"
+        self.source_port = 0
+
+    def connection_made(self, conn: asyncssh.SSHServerConnection) -> None:
+        peer = conn.get_extra_info("peername")
+        if peer:
+            self.source_ip, self.source_port = peer[0], peer[1]
+        conn.set_extra_info(honeypot_server=self)
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        if self.state.session_id:
+            # connection_lost is synchronous; hand the close off to the loop.
+            asyncio.create_task(session_manager.end_session(self.state.session_id))
+
+    async def begin_auth(self, username: str) -> bool:
+        """Open the session here — the first point with a username and a loop.
+
+        Returning True always requires authentication; a decoy that accepted
+        an empty auth would never see the credentials that are the most
+        valuable thing an SSH honeypot collects.
+        """
+        if self.state.session_id is None:
+            if not await self._emulator.rate_limit_ok(self.source_ip):
+                logger.warning("SSH rate limit exceeded for %s", self.source_ip)
+                raise asyncssh.DisconnectError(
+                    asyncssh.DISC_TOO_MANY_CONNECTIONS, "Too many connections"
+                )
+            self.state.session_id = await session_manager.create_session(
+                "ssh", self.source_ip, self.source_port, {"protocol_version": "SSH-2.0"}
+            )
+            await session_manager.record_network_event(
+                self.state.session_id,
+                "ssh_client_banner",
+                {"banner": self._client_version()},
+            )
+        return True
+
+    def _client_version(self) -> str:
+        return "unknown"
+
+    def password_auth_supported(self) -> bool:
+        return True
+
+    def public_key_auth_supported(self) -> bool:
+        # Advertised so key-based attempts are captured too. Every key is
+        # rejected, but the offered public key is recorded first — automated
+        # campaigns reuse keys, which makes them a durable IoC.
+        return True
+
+    def kbdint_auth_supported(self) -> bool:
+        return False
+
+    async def validate_password(self, username: str, password: str) -> bool:
+        """Decide whether this attempt "succeeds".
+
+        Two ways in: the weak credential the decoy advertises for that user,
+        or persistence — any password is accepted once an attacker has tried
+        ``SOFT_ACCEPT_AFTER`` times.
+
+        Letting every password through on the first attempt (the previous
+        behaviour) is its own tell: real systems do not accept ``root`` with
+        one random guess, and a brute-forcer that succeeds instantly learns it
+        is talking to a decoy. Making it work only after a few failures keeps
+        the credential list being recorded, and still gets the attacker to the
+        far more valuable part — what they type once they are in.
+        """
+        state = self.state
+        state.auth_attempts += 1
+        state.username = username
+
+        prior_failures = _failures_by_ip.get(self.source_ip, 0)
+        expected = FAKE_USERS.get(username)
+        accepted = expected is not None and (
+            password == expected or prior_failures >= SOFT_ACCEPT_AFTER
+        )
+        if not accepted:
+            if len(_failures_by_ip) >= _MAX_TRACKED_IPS:
+                _failures_by_ip.clear()
+            _failures_by_ip[self.source_ip] = prior_failures + 1
+        else:
+            _failures_by_ip.pop(self.source_ip, None)
+        await session_manager.record_auth_attempt(
+            state.session_id, username, password, accepted
+        )
+
+        if accepted:
+            state.authenticated = True
+            if username == "root":
+                state.is_root = True
+                state.cwd = "/root"
+            await adaptive_engine.profile_actor(
+                state.session_id,
+                self.source_ip,
+                {
+                    "auth_attempts": state.auth_attempts,
+                    "username_used": username,
+                    "password_used": password,
+                },
+            )
+            return True
+
+        if state.auth_attempts >= MAX_AUTH_ATTEMPTS:
+            raise asyncssh.DisconnectError(
+                asyncssh.DISC_NO_MORE_AUTH_METHODS_AVAILABLE, "Too many failures"
+            )
+        return False
+
+    async def validate_public_key(self, username: str, key) -> bool:
+        try:
+            fingerprint = key.get_fingerprint()
+        except Exception:
+            fingerprint = "unparseable"
+        await session_manager.record_network_event(
+            self.state.session_id,
+            "ssh_pubkey_offered",
+            {"username": username, "fingerprint": fingerprint},
+        )
+        return False
 
 
 class SSHHoneypot(BaseEmulator):
-    MAX_COMMAND_LENGTH = 4096
+    """Real SSH transport in front of the existing emulation layer."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("ssh", config.ssh_port)
         self._hostname = fingerprint_engine.get_fake_hostname()
-        self._fake_users = {
-            "root": "root",
-            "admin": "admin",
-            "user": "password",
-            "test": "test",
-            "ubuntu": "ubuntu",
-            "pi": "raspberry",
-            "oracle": "oracle",
-            "postgres": "postgres",
-        }
-        self._allowed_users = set(self._fake_users.keys())
+        self._acceptor: Optional[asyncssh.SSHAcceptor] = None
 
     def get_banner(self) -> str:
         return fingerprint_engine.get_ssh_banner()
 
-    async def handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ):
-        source_ip, source_port = self._get_peer_info(writer)
-        logger.info(f"SSH connection from {source_ip}:{source_port}")
+    async def handle_client(self, reader, writer):  # pragma: no cover
+        """Unused: asyncssh owns the connection lifecycle for this emulator."""
+        raise NotImplementedError
 
-        if not await self._check_rate_limit(source_ip):
-            logger.warning(f"Rate limit exceeded for {source_ip}")
-            writer.close()
-            await writer.wait_closed()
-            return
+    async def rate_limit_ok(self, source_ip: str) -> bool:
+        return await self._check_rate_limit(source_ip)
 
-        session_id = await session_manager.create_session(
-            "ssh", source_ip, source_port, {"protocol_version": "SSH-2.0"}
-        )
-        state = SSHSessionState()
+    def _host_key(self) -> asyncssh.SSHKey:
+        """Load, or generate once and persist, the server host key.
 
-        try:
-            await self._negotiate_ssh(reader, writer, session_id, source_ip)
-            await self._handle_auth(reader, writer, session_id, state, source_ip)
+        Persisting matters: a host key that changes on every restart makes
+        every returning client print a MITM warning, which is a louder
+        giveaway than any banner.
+        """
+        key_dir = config.session_capture_dir
+        os.makedirs(key_dir, exist_ok=True)
+        key_path = os.path.join(key_dir, "ssh_host_ed25519_key")
 
-            if state.authenticated:
-                await self._handle_shell_session(
-                    reader, writer, session_id, state, source_ip
-                )
-
-        except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
-            pass
-        except Exception as e:
-            logger.error(f"SSH session error: {e}")
-        finally:
-            await session_manager.end_session(session_id)
-            writer.close()
+        if os.path.exists(key_path):
             try:
-                await writer.wait_closed()
+                return asyncssh.read_private_key(key_path)
             except Exception:
-                pass
+                logger.warning("Host key at %s unreadable; regenerating", key_path)
 
-    async def _negotiate_ssh(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        session_id: str,
-        source_ip: str,
-    ):
-        banner = self.get_banner() + "\r\n"
-        await self._send_response(writer, banner)
+        key = asyncssh.generate_private_key("ssh-ed25519")
+        try:
+            with open(key_path, "wb") as handle:
+                handle.write(key.export_private_key())
+            os.chmod(key_path, 0o600)
+        except OSError as exc:
+            # A read-only container is expected; the key just won't persist.
+            logger.warning("Could not persist SSH host key: %s", exc)
+        return key
 
-        await session_manager.record_network_event(
-            session_id, "ssh_banner_sent", {"banner": banner.strip()}
+    async def start(self) -> None:
+        banner = self.get_banner()
+        # asyncssh prepends "SSH-2.0-", so hand it only the software portion
+        # of whichever banner the rotation picked.
+        version = banner.split("SSH-2.0-", 1)[-1] if "SSH-2.0-" in banner else banner
+
+        self._acceptor = await asyncssh.listen(
+            config.bind_address,
+            self.port,
+            server_factory=lambda: _HoneypotSSHServer(self),
+            server_host_keys=[self._host_key()],
+            process_factory=self._handle_process,
+            server_version=version,
+            encoding=None,
+        )
+        self._running = True
+        logger.info(
+            "SSH honeypot listening on %s:%s as %s",
+            config.bind_address,
+            self.port,
+            version,
         )
 
+    async def stop(self) -> None:
+        self._running = False
+        if self._acceptor:
+            self._acceptor.close()
+            await self._acceptor.wait_closed()
+        logger.info("SSH honeypot stopped")
+
+    async def _handle_process(self, process: asyncssh.SSHServerProcess) -> None:
+        conn = process.get_extra_info("connection")
+        server: _HoneypotSSHServer = conn.get_extra_info("honeypot_server")
+        state = server.state
+
         try:
-            client_banner = await asyncio.wait_for(reader.readline(), timeout=30)
-            client_banner_str = client_banner.decode("utf-8", errors="replace").strip()
-            await session_manager.record_network_event(
-                session_id, "ssh_client_banner", {"banner": client_banner_str}
-            )
-        except asyncio.TimeoutError:
-            raise ConnectionResetError("client never sent an SSH identification string")
-
-    async def _handle_auth(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        session_id: str,
-        state: SSHSessionState,
-        source_ip: str,
-    ):
-        max_attempts = 6
-        attempts = 0
-
-        while attempts < max_attempts:
-            username_prompt = "login as: "
-            await self._send_response(writer, username_prompt)
-
-            try:
-                username_data = await asyncio.wait_for(reader.read(256), timeout=120)
-                if not username_data:
-                    return
-                username = username_data.decode("utf-8", errors="replace").strip()
-                username = username.replace("\r", "").replace("\n", "")
-
-                if not username:
-                    attempts += 1
-                    continue
-
-                state.username = username
-                await session_manager.record_keystroke(session_id, username)
-
-            except asyncio.TimeoutError:
-                return
-
-            password_prompt = f"{username}@{source_ip}'s password: "
-            await self._send_response(writer, password_prompt)
-
-            try:
-                password_data = await asyncio.wait_for(reader.read(256), timeout=120)
-                if not password_data:
-                    return
-                password = password_data.decode("utf-8", errors="replace").strip()
-                password = password.replace("\r", "").replace("\n", "")
-
-                state.password = password
-
-            except asyncio.TimeoutError:
-                return
-
-            accepted = username in self._allowed_users
-            await session_manager.record_auth_attempt(
-                session_id, username, password, accepted
-            )
-
-            if accepted:
-                state.authenticated = True
-                if username == "root":
-                    state.is_root = True
-                    state.cwd = "/root"
-
-                await adaptive_engine.profile_actor(session_id, source_ip, {
-                    "auth_attempts": attempts + 1,
-                    "username_used": username,
-                    "password_used": password,
-                })
-
-                welcome = await mode_handler.handle_interaction(
-                    session_id, "ssh", "auth_success",
-                    {"source_ip": source_ip, "username": username},
+            if process.command:
+                # `ssh host 'command'` — how most automated campaigns arrive.
+                # One shot: run it through the emulation layer and exit.
+                await self._run_command(process, server, state, process.command)
+            elif process.subsystem:
+                await session_manager.record_network_event(
+                    state.session_id,
+                    "ssh_subsystem_request",
+                    {"subsystem": process.subsystem},
                 )
-                await self._send_response(writer, welcome)
+                process.stderr.write(b"subsystem request failed on channel 0\r\n")
+                process.exit(1)
                 return
             else:
-                await self._send_response(writer, "Access denied\r\n")
-                attempts += 1
+                await self._interactive_shell(process, server, state)
+        except (asyncssh.BreakReceived, asyncssh.TerminalSizeChanged):
+            pass
+        except (BrokenPipeError, ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            logger.error("SSH session error: %s", exc)
+        finally:
+            if not process.is_closing():
+                process.exit(0)
 
-        await self._send_response(writer, "Connection closed.\r\n")
+    async def _run_command(self, process, server, state, command: str) -> None:
+        command = command[:MAX_COMMAND_LENGTH]
+        await session_manager.record_command(state.session_id, command, "", 0)
+        await adaptive_engine.profile_actor(
+            state.session_id, server.source_ip, {"command": command}
+        )
+        response = await mode_handler.handle_interaction(
+            state.session_id,
+            "ssh",
+            "command",
+            {
+                "command": command,
+                "username": state.username,
+                "cwd": state.cwd,
+                "is_root": state.is_root,
+            },
+        )
+        if response:
+            process.stdout.write(response.encode())
+        process.exit(0)
 
-    async def _handle_shell_session(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        session_id: str,
-        state: SSHSessionState,
-        source_ip: str,
-    ):
-        prompt = await mode_handler.handle_interaction(
-            session_id, "ssh", "prompt",
+    async def _prompt(self, state) -> str:
+        return await mode_handler.handle_interaction(
+            state.session_id,
+            "ssh",
+            "prompt",
             {
                 "username": state.username,
                 "hostname": self._hostname,
@@ -200,66 +342,79 @@ class SSHHoneypot(BaseEmulator):
                 "is_root": state.is_root,
             },
         )
-        await self._send_response(writer, prompt)
+
+    async def _interactive_shell(self, process, server, state) -> None:
+        welcome = await mode_handler.handle_interaction(
+            state.session_id,
+            "ssh",
+            "auth_success",
+            {"source_ip": server.source_ip, "username": state.username},
+        )
+        if welcome:
+            process.stdout.write(welcome.encode())
+        process.stdout.write((await self._prompt(state)).encode())
 
         buffer = ""
-        while True:
+        while not process.stdin.at_eof():
             try:
-                data = await asyncio.wait_for(reader.read(1024), timeout=300)
-                if not data:
-                    break
-
-                decoded = data.decode("utf-8", errors="replace")
-
-                for char in decoded:
-                    await session_manager.record_keystroke(session_id, char)
-
-                    if char == "\r" or char == "\n":
-                        if buffer.strip():
-                            command = buffer.strip()
-                            await session_manager.record_command(
-                                session_id, command, "", 0
-                            )
-
-                            await adaptive_engine.profile_actor(
-                                session_id, source_ip, {"command": command}
-                            )
-
-                            response = await mode_handler.handle_interaction(
-                                session_id, "ssh", "command",
-                                {
-                                    "command": command,
-                                    "username": state.username,
-                                    "cwd": state.cwd,
-                                    "is_root": state.is_root,
-                                },
-                            )
-
-                            if command in ("exit", "logout"):
-                                return
-
-                            await self._send_response(writer, response)
-
-                            prompt = await mode_handler.handle_interaction(
-                                session_id, "ssh", "prompt",
-                                {
-                                    "username": state.username,
-                                    "hostname": self._hostname,
-                                    "cwd": state.cwd,
-                                    "is_root": state.is_root,
-                                },
-                            )
-                            await self._send_response(writer, prompt)
-                        buffer = ""
-                    elif char == "\x7f" or char == "\x08":
-                        if buffer:
-                            buffer = buffer[:-1]
-                            await self._echo(writer, "\x08 \x08")
-                    elif ord(char) >= 32:
-                        if len(buffer) < self.MAX_COMMAND_LENGTH:
-                            buffer += char
-                            await self._echo(writer, char)
-
+                data = await asyncio.wait_for(process.stdin.read(1024), timeout=300)
             except asyncio.TimeoutError:
-                await self._send_response(writer, "\r\nConnection timed out.\r\n")
-                break
+                process.stdout.write(b"\r\nConnection timed out.\r\n")
+                return
+            except asyncssh.TerminalSizeChanged:
+                continue
+
+            if not data:
+                return
+
+            for char in data.decode("utf-8", errors="replace"):
+                await session_manager.record_keystroke(state.session_id, char)
+
+                if char in ("\r", "\n"):
+                    process.stdout.write(b"\r\n")
+                    command = buffer.strip()
+                    buffer = ""
+                    if not command:
+                        process.stdout.write((await self._prompt(state)).encode())
+                        continue
+
+                    if command in ("exit", "logout"):
+                        process.stdout.write(b"logout\r\n")
+                        return
+
+                    await self._run_interactive_command(process, server, state, command)
+                    process.stdout.write((await self._prompt(state)).encode())
+
+                elif char in ("\x7f", "\x08"):
+                    if buffer:
+                        buffer = buffer[:-1]
+                        process.stdout.write(b"\x08 \x08")
+
+                elif char == "\x04":  # Ctrl-D
+                    return
+
+                elif ord(char) >= 32:
+                    if len(buffer) < MAX_COMMAND_LENGTH:
+                        buffer += char
+                        # Echo locally: the client is in raw mode and shows
+                        # nothing unless the server sends it back.
+                        process.stdout.write(char.encode())
+
+    async def _run_interactive_command(self, process, server, state, command: str) -> None:
+        await session_manager.record_command(state.session_id, command, "", 0)
+        await adaptive_engine.profile_actor(
+            state.session_id, server.source_ip, {"command": command}
+        )
+        response = await mode_handler.handle_interaction(
+            state.session_id,
+            "ssh",
+            "command",
+            {
+                "command": command,
+                "username": state.username,
+                "cwd": state.cwd,
+                "is_root": state.is_root,
+            },
+        )
+        if response:
+            process.stdout.write(response.encode())
