@@ -10,6 +10,7 @@ from app.models import HoneypotSession, HoneypotNode, AuditLog, SessionStatus, A
 from app.schemas import HoneypotSessionResponse, SessionListResponse, SessionFilter
 from app.api.export import FILE_EXTENSIONS, MEDIA_TYPES, _render
 from app.services.analysis import analysis_pipeline
+from app.services import enrichment
 
 router = APIRouter()
 
@@ -61,6 +62,11 @@ async def ingest_session_from_honeypot(
     )
     db.add(audit)
     await db.commit()
+
+    # Stage 2 runs detached, after the response. It reads the stored
+    # transcript and asks Chimera what the attacker was attempting; a slow or
+    # absent model degrades the depth of analysis, never the capture.
+    enrichment.schedule(result["session_id"])
 
     return result
 
@@ -183,6 +189,11 @@ async def ingest_session(
     )
     db.add(audit)
     await db.commit()
+
+    # Stage 2 runs detached, after the response. It reads the stored
+    # transcript and asks Chimera what the attacker was attempting; a slow or
+    # absent model degrades the depth of analysis, never the capture.
+    enrichment.schedule(result["session_id"])
 
     return result
 

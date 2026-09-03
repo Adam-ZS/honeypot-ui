@@ -90,6 +90,18 @@ class Settings(BaseSettings):
     MODEL_PATH_IF: str = "./models/isolation_forest_model.pkl"
     SPACY_MODEL: str = "en_core_web_sm"
 
+    # Optional semantic-analysis stage (finding 12). Unset by default, in
+    # which case command analysis stays on the regex path. Point this at any
+    # OpenAI-compatible endpoint serving chimera-14b-v2 — llama.cpp's server,
+    # Ollama or vLLM — e.g. "http://127.0.0.1:8081/v1".
+    #
+    # Deliberately called from the backend, never the honeypot engine: NFR-1
+    # requires zero egress from the engine, and running the user's own weights
+    # locally is what keeps that claim true where a third-party API would not.
+    CHIMERA_URL: str = ""
+    CHIMERA_MODEL: str = "chimera-14b-v2"
+    CHIMERA_TIMEOUT: float = 90.0
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def _split_origins(cls, value):

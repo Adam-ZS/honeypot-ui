@@ -406,3 +406,52 @@ def test_deobfuscation_recurses_and_terminates():
     # No false positives on ordinary commands.
     plain = deobfuscate_commands(["ls -la", "whoami", "cat /etc/passwd"])
     assert plain.layers == []
+
+
+def test_chimera_rejects_hallucinated_attack_ids():
+    """Model output must not be able to inject a fake ATT&CK technique.
+
+    The enrichment stage unions model techniques into the session's mapping.
+    A hallucinated identifier reaching that mapping would put fabricated
+    intelligence in an export that downstream tooling treats as authoritative,
+    so anything not shaped like a real technique ID is dropped.
+    """
+    import json
+
+    from app.ai.llm import ChimeraClient
+
+    parsed = ChimeraClient._parse(json.dumps({
+        "mitre_techniques": [
+            {"id": "NOT-A-TECHNIQUE", "name": "made up"},
+            {"id": "T1059.004", "name": "Unix Shell"},
+            {"id": "T1105", "name": "Ingress Tool Transfer"},
+        ],
+    }))
+
+    assert [t["id"] for t in parsed["mitre_techniques"]] == ["T1059.004", "T1105"]
+
+
+def test_chimera_survives_reasoning_model_output():
+    """Reasoning fine-tunes narrate and fence their JSON; both must parse."""
+    import json
+
+    from app.ai.llm import ChimeraClient
+
+    payload = json.dumps({"intent": "drop a miner", "confidence": 0.7})
+
+    for variant in (payload, f"```json\n{payload}\n```", f"Let me think.\n\n{payload}"):
+        parsed = ChimeraClient._parse(variant)
+        assert parsed is not None and parsed["intent"] == "drop a miner"
+
+    # Confidence is clamped, not trusted.
+    assert ChimeraClient._parse(json.dumps({"confidence": 47}))["confidence"] == 1.0
+    assert ChimeraClient._parse("I cannot help with that.") is None
+
+
+def test_enrichment_is_disabled_without_an_endpoint():
+    """Absent configuration must leave ingest on the regex path, not fail it."""
+    from app.ai.llm import ChimeraClient
+
+    client = ChimeraClient()
+    client._settings = type("S", (), {"CHIMERA_URL": ""})()
+    assert client.enabled is False
