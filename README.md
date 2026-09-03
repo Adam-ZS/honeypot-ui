@@ -59,13 +59,22 @@ Each ingested session runs through, in order:
 |---|---|---|
 | Geolocation | MaxMind GeoLite2 | country / city / lat / lon, or an explicit "unknown" |
 | Classification | Random Forest over 36 CIC-IDS-style flow features | benign / reconnaissance / exploitation / exfiltration |
+| De-obfuscation | Recursive base64 / hex / escape / URL decoding, depth- and size-bounded | decoded layers, merged into the text everything below matches against |
 | Command NLP | Regex tool + intent signatures, optional spaCy NER | tool names, intents, extracted IPs/URLs |
 | Anomaly detection | Isolation Forest over 11 behavioural features | anomaly score, outlier flag |
-| Attacker profiling | Weighted rule clustering | automated bot / script kiddie / skilled / APT |
+| Attacker profiling | Weighted indicator scorecard | automated bot / script kiddie / skilled / APT |
+| Behavioural clustering | Mini-batch k-means over 10 behavioural features | cluster id, centroid distance, outlier flag |
 | ATT&CK mapping | Tool + intent → technique lookup | tactic IDs and technique objects |
 | Severity | Composite score over the above | low / medium / high / critical |
 
 Raw commands and payloads are encrypted before they are stored.
+
+A **second stage runs asynchronously**, after the response has been returned.
+If `CHIMERA_URL` points at a local endpoint serving the project's fine-tuned
+model, it reads the stored transcript and returns intent, objectives, ATT&CK
+techniques and indicators, merged onto the session. The split exists because
+NFR-2 budgets 200 ms for classification and a 14B model answers in seconds; a
+slow or absent model degrades the depth of analysis, never the capture.
 
 ---
 
@@ -80,15 +89,18 @@ structurally plausible but their confidence scores are not calibrated against
 real traffic. Every classification response carries
 `model_source: "synthetic"` so this is visible in the API, and the pipeline
 never presents a synthetic verdict as ground truth. To get real numbers,
-train on a labelled corpus (e.g. CIC-IDS2017) and drop the pickle at the
-configured path — the response will then report `model_source: "pretrained"`.
+train it: `cd backend && python -m ml.train --data /path/to/CIC-IDS2017/`
+writes both the model and a metrics artefact, after which the API reports
+`model_source: "cicids2017"`. See `backend/ml/README.md`, which also documents
+the domain shift between CIC-IDS2017's flow records and the session data this
+system actually captures — a limitation worth reading before quoting any
+figure the trainer produces.
 
-**The SSH emulator is not an SSH server.** It sends a real SSH identification
-string and then speaks a plaintext line protocol. That captures the automated
-scanners and credential-stuffing bots which make up the overwhelming majority
-of internet background noise, but a genuine SSH client will fail at key
-exchange. Implementing the SSH transport layer (e.g. with `asyncssh`) is the
-natural next step.
+**Nothing has been trained yet, and nothing has captured real traffic yet.**
+The pipeline above is implemented and tested end to end, but no honeypot node
+has run against the internet, so the behavioural clusters are unfitted and no
+session has passed through the second stage. Treat every number the API
+currently returns as structural, not empirical.
 
 **Isolation is verified, not enforced by this code.** The real controls are
 the container runtime's (`cap_drop: ALL`, `read_only`, `no-new-privileges`,
@@ -114,7 +126,9 @@ instance; running multiple workers needs a shared backend (Redis).
 | Authorisation | Role hierarchy viewer < analyst < admin, enforced per route |
 | Registration | Always creates a **viewer**; roles are assigned only by an admin |
 | Email OTP | 6 digits from `secrets`, stored as an HMAC digest, 5-attempt limit, 10-minute expiry |
-| Encryption at rest | Fernet (AES-128-CBC + HMAC-SHA256) over captured commands and payloads |
+| Multi-factor auth | TOTP (RFC 6238); enrolment requires a valid code before activation, single-use recovery codes |
+| Database transport | TLS required outside development (`DATABASE_SSL` to override) |
+| Encryption at rest | AES-256-GCM, unique nonce per record, over captured commands, payloads and authenticator secrets |
 | Service-to-service | Shared `HONEYPOT_INGEST_TOKEN`, compared in constant time |
 | Rate limiting | Per-IP via slowapi; 5/min register, 10/min login, 3/min OTP resend |
 | Secrets | The app **refuses to start** in a non-development environment if any secret is still a placeholder |
@@ -167,7 +181,7 @@ npm ci && npm run dev
 ## Tests
 
 ```bash
-cd backend && pytest          # 53 tests
+cd backend && pytest          # 70 tests
 npm run lint                  # eslint, zero warnings tolerated
 npm run build                 # production bundle
 ```
@@ -217,13 +231,19 @@ HTTP port behind a TLS-terminating proxy, so they cannot accept raw SSH or
 FTP connections — the engine would start, bind ports nothing can reach, and
 fail its health check. Run it on a host where you control the network:
 
+Use `deploy/node/`, **not** the compose file at the repository root — the
+root file's honeypot service declares `depends_on: backend`, so running it on
+a node would start a second backend and PostgreSQL alongside the engine.
+
 ```bash
-# On the VPS
-git clone https://github.com/mandoof1/honeypot-ui.git && cd honeypot-ui
+# On the VM
+git clone https://github.com/mandoof1/honeypot-ui.git
+cd honeypot-ui/deploy/node
+sudo bash bootstrap.sh        # moves real SSH to 22022 first, then redirects 22
 cp .env.example .env
 # Set BACKEND_API_URL to your deployed API and copy HONEYPOT_INGEST_TOKEN
 # from the Render dashboard so both sides share the same value.
-docker compose up -d --build honeypot
+docker compose up -d --build
 ```
 
 Full walkthrough in [DEPLOY.md](DEPLOY.md).
@@ -280,17 +300,20 @@ Bearer <access_token>`.
 ```
 backend/          FastAPI application
   app/api/        route handlers
-  app/ai/         classifier, NLP, anomaly detection, profiling, ATT&CK
-  app/core/       config, database, security, encryption, rate limiting
-  app/services/   analysis pipeline, alerting, email, geoip, reporting
+  app/ai/         classifier, de-obfuscation, NLP, clustering, ATT&CK, LLM client
+  app/core/       config, database, security, encryption, TOTP, rate limiting
+  app/services/   analysis pipeline, async enrichment, alerting, email, geoip
   alembic/        migrations
+  ml/             classifier training + evaluation, cluster fitting
   tests/          pytest suite
 honeypot/         standalone capture engine (minimal dependencies)
-  emulators/      SSH, FTP, HTTP/HTTPS
+  emulators/      SSH (real transport), FTP, HTTP/HTTPS
   core/           config, session manager, response modes, control API, TLS
   security/       rate limiting, egress filtering, isolation verification
   adaptive/       banner rotation, actor profiling
 src/              React dashboard
+deploy/node/      standalone engine deployment for a remote VM
+scripts/          GeoLite2 fetch
 ```
 
 ---
@@ -301,10 +324,10 @@ src/              React dashboard
 |---|---|
 | Frontend | React 19, Vite 8, Tailwind CSS 4, React Router 7, Leaflet |
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2 (async), Pydantic v2 |
-| AI/ML | scikit-learn, spaCy |
+| AI/ML | scikit-learn, spaCy, optional local LLM over an OpenAI-compatible endpoint |
 | Database | PostgreSQL 16, Alembic migrations |
 | Auth | JWT (python-jose), PBKDF2-HMAC-SHA256, slowapi |
-| Engine | Pure asyncio — `httpx` and `cryptography` only |
+| Engine | asyncio — `asyncssh` for the SSH transport, `httpx`, `cryptography` |
 
 ---
 
