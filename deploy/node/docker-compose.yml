@@ -1,0 +1,68 @@
+# Standalone honeypot node.
+#
+# Runs ONLY the engine, reporting into a HoneySentinel backend that lives
+# somewhere else (Render, in the reference deployment). Use this on the
+# internet-facing box; use the repository-root compose file for a full local
+# stack instead.
+#
+# The root compose file cannot be used here: its honeypot service declares
+# `depends_on: backend`, so `docker compose up honeypot` would also start a
+# second backend and Postgres on the node.
+#
+#   cp .env.example .env   # then fill it in
+#   docker compose up -d --build
+#   docker compose logs -f
+
+services:
+  honeypot:
+    build:
+      # The build context is the repository root so `honeypot` stays an
+      # importable package.
+      context: ../..
+      dockerfile: honeypot/Dockerfile
+    container_name: honeysentinel-node
+    env_file: .env
+    environment:
+      HONEYPOT_CONTAINER: "true"
+      HONEYPOT_BIND_ADDRESS: 0.0.0.0
+      HONEYPOT_SSH_PORT: "2222"
+      HONEYPOT_FTP_PORT: "2121"
+      HONEYPOT_HTTP_PORT: "8080"
+      HONEYPOT_HTTPS_PORT: "8443"
+      HONEYPOT_CONTROL_PORT: "8000"
+      HONEYPOT_CAPTURE_DIR: /app/data/sessions
+      HONEYPOT_FILE_CAPTURE_DIR: /app/data/uploads
+      HONEYPOT_LOG_DIR: /app/data/logs
+
+    ports:
+      # Emulated services, deliberately published so they can be probed.
+      - "2222:2222"
+      - "2121:2121"
+      - "8080:8080"
+      - "8443:8443"
+      # The control API is bound to loopback only. It is authenticated by a
+      # shared token alone, so it must never face the internet; tunnel to it
+      # if the backend needs to reach it.
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      - node_data:/app/data
+
+    # Same hardening as the bundled stack: no capabilities beyond binding a
+    # port, an immutable root filesystem, and no privilege escalation. The
+    # emulators never execute attacker input, but this is the box that is
+    # deliberately exposed, so it gets the strictest profile available.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100M
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  node_data:

@@ -74,71 +74,100 @@ paths to `index.html` for client-side routing.
 
 ---
 
-## 3. Honeypot engine on a VPS
+## 3. Honeypot engine on a free VM
 
-The engine listens on raw TCP ports (2222/2121/8080/8443). PaaS free tiers
-expose a single HTTP port behind a TLS-terminating proxy and cannot forward
-those connections, so the engine must run somewhere you control the network.
+The engine listens on raw TCP ports (2222/2121/8080/8443). PaaS free tiers —
+Render, Vercel, Railway, Fly's HTTP services — expose a single HTTP port
+behind a TLS-terminating proxy and cannot forward those connections, so the
+engine needs a machine where you control the network. That rules out putting
+it next to the backend on Render.
 
-Any small instance works — it has been run on a $4/month DigitalOcean droplet
-and on Oracle Cloud's always-free tier.
+Two hosts give you one permanently, with no card charged after a trial:
+
+| Host | Always-free allowance | Notes |
+|---|---|---|
+| **Oracle Cloud** (recommended) | 2 Ampere ARM OCPUs, 12 GB RAM, 200 GB block storage | Halved from 4/24 in June 2026, still far more than this needs. Card required for identity check only. |
+| **Google Cloud** | 1 `e2-micro`, 30 GB disk, in `us-west1`/`us-central1`/`us-east1` | 1 GB/month egress. Tighter, but sufficient — the engine's traffic is almost all inbound. |
+
+Both give a public IPv4 and arbitrary inbound TCP, which is the requirement.
+The engine image is `python:3.12-slim` with two pure-Python dependencies, so
+it builds unmodified on ARM.
+
+### Before you start
+
+Running a honeypot on a free tier is not free of consequences. It advertises
+open services and will be found within hours. Two things follow from that:
+
+- **Read the provider's acceptable-use policy.** A honeypot that only records
+  inbound connections is ordinarily fine, but an instance that starts emitting
+  traffic will draw abuse reports and free accounts get reclaimed quickly. The
+  engine's egress allowlist and the container hardening below exist for this;
+  do not disable them.
+- **Use a throwaway project, not your main account.** If the instance is
+  suspended you want to lose the instance, not the account holding the rest of
+  your work.
+
+The emulators never execute attacker input — they return canned protocol
+responses — so a shell is never spawned. That is what makes this reasonable to
+expose at all.
+
+### Provisioning
+
+Create an Ubuntu 22.04 or 24.04 instance, then open the ports **in the cloud
+firewall as well as on the host**. On Oracle these are separate systems and
+the cloud one silently drops traffic if you forget:
+
+> Networking → Virtual Cloud Networks → *your VCN* → Security Lists →
+> Default Security List → **Add Ingress Rules** — source `0.0.0.0/0`,
+> TCP `21`, `22`, `80`, `443`, plus `22022` for your own SSH.
+
+### Installing
 
 ```bash
 git clone https://github.com/mandoof1/honeypot-ui.git
-cd honeypot-ui
+cd honeypot-ui/deploy/node
+sudo bash bootstrap.sh
+```
+
+`bootstrap.sh` moves the real SSH daemon to port 22022 and makes you confirm
+you can still log in **before** it hands port 22 to the emulator, installs
+Docker, and persists the port redirects. Read it before running it; it changes
+how you reach the box.
+
+Then point the node at the backend:
+
+```bash
 cp .env.example .env
+$EDITOR .env          # BACKEND_API_URL and HONEYPOT_INGEST_TOKEN
+docker compose up -d --build
+docker compose logs -f
 ```
 
-Edit `.env`:
+`HONEYPOT_INGEST_TOKEN` must be byte-identical to the value on the backend —
+copy it from the Render dashboard under Environment. A mismatch shows up as
+`401` in the node's log and no sessions ever appear.
 
-```env
-BACKEND_API_URL=https://your-api.onrender.com/api/v1
-# Must be byte-identical to the value on the backend.
-HONEYPOT_INGEST_TOKEN=<copied from Render>
-HONEYPOT_PROTOCOLS=ssh,ftp,http
-HONEYPOT_OPERATIONAL_MODE=active
-HONEYPOT_ENABLE_ISOLATION=true
-```
+> Use this `deploy/node/` compose file, not the one at the repository root.
+> The root file's honeypot service declares `depends_on: backend`, so running
+> it here would start a second backend and Postgres alongside the engine.
 
-Start only the engine:
-
-```bash
-docker compose up -d --build honeypot
-docker compose logs -f honeypot
-```
-
-On startup the engine:
-
-1. verifies its isolation and logs any failing check,
-2. registers itself with the backend as a node,
-3. binds the enabled emulators,
-4. starts its control API on `HONEYPOT_CONTROL_PORT` (8000 by default).
-
-### Exposing it to real traffic
-
-Emulators bind unprivileged ports so the container never needs root. Redirect
-the well-known ports at the host firewall:
-
-```bash
-sudo iptables -t nat -A PREROUTING -p tcp --dport 22   -j REDIRECT --to-port 2222
-sudo iptables -t nat -A PREROUTING -p tcp --dport 21   -j REDIRECT --to-port 2121
-sudo iptables -t nat -A PREROUTING -p tcp --dport 80   -j REDIRECT --to-port 8080
-sudo iptables -t nat -A PREROUTING -p tcp --dport 443  -j REDIRECT --to-port 8443
-```
-
-**Move your real SSH daemon to another port first**, and confirm you can log
-in on the new port from a second terminal before applying the redirect.
+On startup the engine verifies its isolation, registers itself with the
+backend as a node, binds the enabled emulators, and starts its control API on
+loopback.
 
 ### Letting the backend reach the control API
 
-`/api/v1/honeypot/*` proxies to the engine. Set `HONEYPOT_CONTROL_URL` on the
-backend to wherever the control API is reachable. **Do not publish port 8000
-to the internet** — it is authenticated only by the shared token. Use a
-private network, a WireGuard tunnel, or an SSH tunnel. If the backend cannot
-reach it, those routes return a clear "engine unreachable" response rather
-than fabricated status data.
+`/api/v1/honeypot/*` proxies to the engine, and the compose file binds that
+port to `127.0.0.1` only — it is authenticated by the shared token alone and
+must never face the internet.
 
----
+Render's free tier has no static outbound IP, so it cannot be allowlisted.
+Either:
+
+- **Leave it closed.** Sessions still ingest normally; the dashboard shows
+  "Engine unreachable" and hides live emulation status. Nothing is fabricated.
+- **Expose it through a free Cloudflare Tunnel** and set `HONEYPOT_CONTROL_URL`
+  on the backend to the tunnel hostname, with Cloudflare Access in front.
 
 ## 4. Optional: GeoIP
 
