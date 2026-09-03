@@ -364,7 +364,7 @@ async def enroll_mfa(
     a mistyped setup would lock them out of their own account.
     """
     user = (
-        await db.execute(select(User).where(User.id == int(current_user["sub"])))
+        await db.execute(select(User).where(User.id == int(current_user["id"])))
     ).scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -392,7 +392,7 @@ async def confirm_mfa(
 ):
     """Turn MFA on, once a working code proves the app is set up."""
     user = (
-        await db.execute(select(User).where(User.id == int(current_user["sub"])))
+        await db.execute(select(User).where(User.id == int(current_user["id"])))
     ).scalar_one_or_none()
     if user is None or not user.totp_secret_encrypted:
         raise HTTPException(status_code=400, detail="Start enrolment first")
@@ -430,7 +430,7 @@ async def disable_mfa(
 ):
     """Turn MFA off. Requires a current code, not just a session."""
     user = (
-        await db.execute(select(User).where(User.id == int(current_user["sub"])))
+        await db.execute(select(User).where(User.id == int(current_user["id"])))
     ).scalar_one_or_none()
     if user is None or not user.totp_enabled:
         raise HTTPException(status_code=400, detail="Authenticator is not enabled")
