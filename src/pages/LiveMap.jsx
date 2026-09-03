@@ -1,19 +1,24 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { CircleMarker, MapContainer, Popup, TileLayer, Tooltip } from 'react-leaflet'
+import {
+  CircleMarker, MapContainer, Popup, TileLayer, Tooltip, ZoomControl,
+} from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
-import { MapPinOff } from 'lucide-react'
 import { api } from '../services/api'
 import ErrorBanner from '../components/ErrorBanner'
+import { LoadingRegion } from '../components/Loading'
+import { SEVERITY_COLOR, SEVERITY_ORDER, CATEGORY_LABEL } from '../lib/severity'
 
-const SEVERITY_CONFIG = {
-  critical: { color: '#f85149', radius: 10, opacity: 0.9 },
-  high: { color: '#e3692a', radius: 8, opacity: 0.8 },
-  medium: { color: '#58a6ff', radius: 6, opacity: 0.7 },
-  low: { color: '#3fb950', radius: 4, opacity: 0.6 },
+const REFRESH_MS = 10000
+
+/** Marker size follows the severity scale, so magnitude reads without hue. */
+const MARKER = {
+  low: { radius: 4, opacity: 0.5 },
+  medium: { radius: 6, opacity: 0.6 },
+  high: { radius: 8, opacity: 0.72 },
+  critical: { radius: 11, opacity: 0.85 },
 }
 
-const FILTERS = ['all', 'critical', 'high', 'medium', 'low']
-const REFRESH_MS = 10000
+const FILTERS = ['all', ...SEVERITY_ORDER]
 
 export default function LiveMap() {
   const [events, setEvents] = useState([])
@@ -33,7 +38,6 @@ export default function LiveMap() {
   }, [])
 
   useEffect(() => {
-    // Deferred so the effect body performs no synchronous state update.
     const timer = setTimeout(fetchEvents, 0)
     const interval = setInterval(fetchEvents, REFRESH_MS)
     return () => {
@@ -52,16 +56,16 @@ export default function LiveMap() {
     [events],
   )
 
-  // Counts per severity are computed once over the whole set, so each filter
-  // button shows its own total. The button label previously interpolated an
-  // object and rendered "[object Object]" on every severity chip.
-  const countsBySeverity = useMemo(() => {
-    const counts = { all: locatable.length }
-    for (const key of Object.keys(SEVERITY_CONFIG)) counts[key] = 0
+  // Counts are computed once over the whole set so each filter shows its own
+  // total. An earlier version interpolated an object here and rendered
+  // "[object Object]" on every chip.
+  const counts = useMemo(() => {
+    const c = { all: locatable.length }
+    for (const key of SEVERITY_ORDER) c[key] = 0
     for (const event of locatable) {
-      if (event.severity in counts) counts[event.severity] += 1
+      if (event.severity in c) c[event.severity] += 1
     }
-    return counts
+    return c
   }, [locatable])
 
   const visible = useMemo(
@@ -69,111 +73,148 @@ export default function LiveMap() {
     [locatable, filter],
   )
 
+  const byCountry = useMemo(() => {
+    const acc = {}
+    for (const e of locatable) {
+      const name = e.geo_country_name || e.geo_country
+      if (name) acc[name] = (acc[name] || 0) + 1
+    }
+    return Object.entries(acc).sort((a, b) => b[1] - a[1]).slice(0, 8)
+  }, [locatable])
+
   const unlocatable = events.length - locatable.length
 
   return (
-    <div className="space-y-4">
+    <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-3">
       {error && <ErrorBanner message={error} onRetry={fetchEvents} />}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-4">
-          <span className="text-xs font-mono text-gray-400">
-            {visible.length} of {events.length} events mapped
-          </span>
-          <div className="flex flex-wrap gap-2">
-            {FILTERS.map((key) => (
-              <button
-                key={key}
-                type="button"
-                aria-pressed={filter === key}
-                onClick={() => setFilter(key)}
-                className={`px-3 py-1 text-xs font-mono rounded-full border transition-all capitalize ${
-                  filter === key
-                    ? 'bg-surface-600 border-border text-white'
-                    : 'border-border/50 text-gray-500 hover:text-gray-300'
-                }`}
-              >
-                {key} ({countsBySeverity[key] ?? 0})
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {Object.entries(SEVERITY_CONFIG).map(([sev, cfg]) => (
-            <div key={sev} className="flex items-center gap-1.5">
-              <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: cfg.color }} />
-              <span className="text-[10px] font-mono text-gray-500 uppercase">{sev}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {unlocatable > 0 && (
-        <div className="flex items-center gap-2 text-xs font-mono text-gray-500 bg-surface-800 border border-border rounded-lg px-3 py-2">
-          <MapPinOff className="w-3.5 h-3.5 shrink-0" />
-          {unlocatable} event{unlocatable === 1 ? '' : 's'} could not be
-          geolocated and {unlocatable === 1 ? 'is' : 'are'} not shown. Configure
-          GEOIP_DB_PATH with a MaxMind GeoLite2 database to resolve locations.
-        </div>
-      )}
-
-      <div className="h-[calc(100vh-14rem)] rounded-xl overflow-hidden border border-border">
+      {/* The map is the page, not a widget inside it. Controls and readings
+          float over it rather than pushing it into a box. */}
+      <div className="panel relative min-h-0 flex-1 overflow-hidden">
         {loading ? (
-          <div className="h-full bg-surface-800 flex items-center justify-center">
-            <div className="flex items-center gap-3">
-              <div className="w-6 h-6 border-2 border-accent-cyan border-t-transparent rounded-full animate-spin" />
-              <span className="font-mono text-sm text-gray-400">Loading threat map...</span>
-            </div>
-          </div>
+          <LoadingRegion label="Loading origins" className="h-full" />
         ) : (
-          <MapContainer
-            center={[20, 0]}
-            zoom={2}
-            style={{ height: '100%', width: '100%', background: '#0d1117' }}
-            worldCopyJump
-          >
-            <TileLayer
-              url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-              attribution='&copy; <a href="https://carto.com/">CARTO</a> &copy; OpenStreetMap contributors'
-            />
+          <>
+            <MapContainer
+              center={[25, 10]}
+              zoom={2}
+              minZoom={2}
+              style={{ height: '100%', width: '100%' }}
+              worldCopyJump
+              // The default control sits top-left, directly under the
+              // severity filters that float there.
+              zoomControl={false}
+            >
+              <ZoomControl position="bottomright" />
+              <TileLayer
+                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                attribution='&copy; <a href="https://carto.com/">CARTO</a> &copy; OpenStreetMap contributors'
+              />
 
-            {visible.map((event) => {
-              const cfg = SEVERITY_CONFIG[event.severity] || SEVERITY_CONFIG.low
-              return (
-                <CircleMarker
-                  key={event.session_uuid}
-                  center={[event.geo_lat, event.geo_lon]}
-                  radius={cfg.radius}
-                  pathOptions={{
-                    color: cfg.color,
-                    fillColor: cfg.color,
-                    fillOpacity: cfg.opacity,
-                    weight: 1,
-                  }}
-                >
-                  <Tooltip direction="top" offset={[0, -10]}>
-                    <div className="font-mono text-xs">
-                      <div className="font-semibold">{event.attacker_ip}</div>
-                      <div>{event.geo_country_name || event.geo_country || 'Unknown'}</div>
-                    </div>
-                  </Tooltip>
-                  <Popup>
-                    <div className="font-mono text-xs space-y-1">
-                      <div className="font-semibold">{event.attacker_ip}</div>
-                      <div>Country: {event.geo_country_name || event.geo_country || 'Unknown'}</div>
-                      <div>Protocol: {event.protocol || 'unknown'}</div>
-                      <div>Category: {event.attack_category || 'unclassified'}</div>
-                      <div>
-                        Severity: <span style={{ color: cfg.color }}>{event.severity}</span>
+              {visible.map((event) => {
+                const marker = MARKER[event.severity] || MARKER.low
+                const color = SEVERITY_COLOR[event.severity] || 'var(--color-paper-3)'
+                return (
+                  <CircleMarker
+                    key={event.session_uuid}
+                    center={[event.geo_lat, event.geo_lon]}
+                    radius={marker.radius}
+                    pathOptions={{
+                      color,
+                      fillColor: color,
+                      fillOpacity: marker.opacity,
+                      weight: 1,
+                    }}
+                  >
+                    <Tooltip direction="top" offset={[0, -10]}>
+                      <span className="readout text-xs font-semibold">
+                        {event.attacker_ip}
+                      </span>
+                      <br />
+                      <span className="text-xs">
+                        {event.geo_country_name || event.geo_country || 'Unknown origin'}
+                      </span>
+                    </Tooltip>
+                    <Popup>
+                      <div className="min-w-44 space-y-1">
+                        <p className="readout text-xs font-semibold">{event.attacker_ip}</p>
+                        <p className="text-xs">
+                          {event.geo_country_name || event.geo_country || 'Unknown origin'}
+                        </p>
+                        <p className="text-xs">
+                          <span className="uppercase">{event.protocol || 'unknown'}</span>
+                          {' · '}
+                          {CATEGORY_LABEL[event.attack_category] || CATEGORY_LABEL.unknown}
+                        </p>
+                        <p className="text-xs capitalize" style={{ color }}>
+                          {event.severity} severity
+                        </p>
+                        <p className="readout text-[11px] opacity-70">
+                          {new Date(event.timestamp).toLocaleString()}
+                        </p>
                       </div>
-                      <div>{new Date(event.timestamp).toLocaleString()}</div>
-                    </div>
-                  </Popup>
-                </CircleMarker>
-              )
-            })}
-          </MapContainer>
+                    </Popup>
+                  </CircleMarker>
+                )
+              })}
+            </MapContainer>
+
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-[500] flex flex-wrap items-start justify-between gap-2 p-3">
+              <div className="pointer-events-auto flex flex-wrap gap-1.5">
+                {FILTERS.map((key) => {
+                  const isActive = filter === key
+                  const color = key === 'all' ? 'var(--color-paper)' : SEVERITY_COLOR[key]
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      aria-pressed={isActive}
+                      onClick={() => setFilter(key)}
+                      className="control bg-ink-1/95 capitalize backdrop-blur"
+                      style={isActive ? { borderColor: color } : undefined}
+                    >
+                      {key !== 'all' && (
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ background: color }}
+                          aria-hidden="true"
+                        />
+                      )}
+                      {key === 'all' ? 'All' : key}
+                      <span className="readout text-[12px] text-paper-3">
+                        {counts[key] ?? 0}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+
+              {byCountry.length > 0 && (
+                <div className="pointer-events-auto w-48 rounded-[4px] border border-line bg-ink-1/95 p-3 backdrop-blur">
+                  <p className="eyebrow">Top origins</p>
+                  <dl className="mt-2 space-y-1">
+                    {byCountry.map(([name, count]) => (
+                      <div key={name} className="flex items-baseline gap-2">
+                        <dt className="min-w-0 flex-1 truncate text-[12px] text-paper-2">
+                          {name}
+                        </dt>
+                        <dd className="readout text-[12px] text-paper">{count}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
+            </div>
+
+            {unlocatable > 0 && (
+              <p className="pointer-events-none absolute bottom-3 left-3 z-[500] max-w-md rounded-[4px] border border-line bg-ink-1/95 px-3 py-2 text-[12px] text-paper-2 backdrop-blur">
+                <span className="readout text-paper">{unlocatable}</span>{' '}
+                {unlocatable === 1 ? 'event has' : 'events have'} no location.
+                Point <span className="readout">GEOIP_DB_PATH</span> at a MaxMind
+                GeoLite2 database to resolve them.
+              </p>
+            )}
+          </>
         )}
       </div>
     </div>

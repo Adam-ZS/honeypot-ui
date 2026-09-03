@@ -1,36 +1,12 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { AlertCircle, ArrowLeft, CheckCircle, KeyRound, ShieldAlert } from 'lucide-react'
+import { ArrowLeft } from 'lucide-react'
 import { api } from '../services/api'
+import AuthShell, {
+  Field, Outcome, OtpInput, SubmitButton,
+} from '../components/AuthShell'
 
 const MIN_PASSWORD_LENGTH = 12
-
-// Declared at module scope: components defined inside a render are recreated
-// on every render, which remounts their whole subtree and loses input focus.
-function Shell({ children }) {
-  return (
-    <div className="min-h-screen grid-bg flex items-center justify-center px-4 py-12">
-      <div className="w-full max-w-md animate-slide-up">
-        <div className="flex items-center gap-3 mb-10 justify-center">
-          <ShieldAlert className="text-accent-cyan w-8 h-8" />
-          <span className="font-mono text-xl font-semibold tracking-widest uppercase text-accent-cyan">
-            HoneySentinel
-          </span>
-        </div>
-        <div className="bg-surface-800 border border-border rounded-xl p-8">{children}</div>
-      </div>
-    </div>
-  )
-}
-
-function FieldError({ message }) {
-  if (!message) return null
-  return (
-    <p className="mt-1.5 flex items-center gap-1 text-xs text-accent-red font-mono">
-      <AlertCircle className="w-3 h-3" /> {message}
-    </p>
-  )
-}
 
 /**
  * Password reset.
@@ -48,11 +24,6 @@ export default function ForgotPassword() {
   const [confirm, setConfirm] = useState('')
   const [errors, setErrors] = useState({})
   const [loading, setLoading] = useState(false)
-
-  const inputClass = (key) =>
-    `w-full bg-surface-700 border rounded-lg px-4 py-2.5 text-sm text-white placeholder-gray-600 font-mono outline-none transition-all focus:ring-1 focus:ring-accent-blue ${
-      errors[key] ? 'border-accent-red' : 'border-border focus:border-accent-blue'
-    }`
 
   const handleRequest = async (event) => {
     event.preventDefault()
@@ -75,11 +46,11 @@ export default function ForgotPassword() {
   const handleConfirm = async (event) => {
     event.preventDefault()
     const next = {}
-    if (otpCode.length !== 6) next.otp = 'Enter the 6-digit code.'
+    if (otpCode.length !== 6) next.otp = 'Enter all six digits.'
     if (password.length < MIN_PASSWORD_LENGTH) {
-      next.password = `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`
+      next.password = `Use at least ${MIN_PASSWORD_LENGTH} characters.`
     }
-    if (password !== confirm) next.confirm = 'Passwords do not match.'
+    if (password !== confirm) next.confirm = 'These do not match.'
     if (Object.keys(next).length) {
       setErrors(next)
       return
@@ -102,141 +73,113 @@ export default function ForgotPassword() {
 
   if (step === 'done') {
     return (
-      <Shell>
-        <div className="text-center">
-          <CheckCircle className="w-14 h-14 text-accent-green mx-auto mb-6" />
-          <h1 className="text-2xl font-semibold text-white mb-2">Password updated</h1>
-          <p className="text-sm text-gray-400 mb-8 font-mono">
-            You can now sign in with your new password.
-          </p>
-          <button
-            type="button"
-            onClick={() => navigate('/login')}
-            className="bg-accent-cyan hover:bg-cyan-300 text-surface-900 font-semibold text-sm rounded-lg px-8 py-2.5 transition-all font-mono tracking-wider uppercase"
-          >
-            Sign in
-          </button>
-        </div>
-      </Shell>
+      <AuthShell>
+        <Outcome
+          title="Password updated"
+          action={
+            <button
+              type="button"
+              onClick={() => navigate('/login')}
+              className="control control-primary"
+            >
+              Sign in
+            </button>
+          }
+        >
+          Use your new password to sign in.
+        </Outcome>
+      </AuthShell>
     )
   }
 
   if (step === 'confirm') {
     return (
-      <Shell>
+      <AuthShell
+        title="Set a new password"
+        subtitle={
+          <>
+            If an account exists for{' '}
+            <span className="readout text-paper">{email}</span>, we sent it a
+            six-digit code.
+          </>
+        }
+      >
         <button
           type="button"
           onClick={() => setStep('request')}
-          className="flex items-center gap-1 text-xs font-mono text-gray-500 hover:text-gray-300 mb-6 transition-colors"
+          className="mb-5 flex items-center gap-1.5 text-[13px] font-medium text-paper-3 transition-colors hover:text-paper"
         >
-          <ArrowLeft className="w-3 h-3" /> Back
+          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
+          Use a different email
         </button>
 
-        <div className="flex items-center gap-2 mb-1">
-          <KeyRound className="w-5 h-5 text-accent-cyan" />
-          <h1 className="text-2xl font-semibold text-white">Set a new password</h1>
-        </div>
-        <p className="text-sm text-gray-500 mb-6 font-mono">
-          If an account exists for {email}, we sent it a 6-digit code.
-        </p>
-
-        <form onSubmit={handleConfirm} noValidate className="space-y-5">
-          <div>
-            <label htmlFor="otp" className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-              Reset code
-            </label>
-            <input
-              id="otp"
-              inputMode="numeric"
-              maxLength={6}
-              placeholder="000000"
+        <form onSubmit={handleConfirm} noValidate className="space-y-4">
+          <Field label="Reset code" error={errors.otp}>
+            <OtpInput
               value={otpCode}
-              onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
-              className={`${inputClass('otp')} text-center text-2xl tracking-[0.5em]`}
+              invalid={Boolean(errors.otp)}
+              onChange={setOtpCode}
             />
-            <FieldError message={errors.otp} />
-          </div>
+          </Field>
 
-          <div>
-            <label htmlFor="new-password" className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-              New password
-            </label>
+          <Field
+            label="New password"
+            error={errors.password}
+            hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
+          >
             <input
-              id="new-password"
               type="password"
               autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className={inputClass('password')}
+              className={`field ${errors.password ? 'field-invalid' : ''}`}
             />
-            <FieldError message={errors.password} />
-          </div>
+          </Field>
 
-          <div>
-            <label htmlFor="confirm-password" className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-              Confirm password
-            </label>
+          <Field label="Confirm password" error={errors.confirm}>
             <input
-              id="confirm-password"
               type="password"
               autoComplete="new-password"
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
-              className={inputClass('confirm')}
+              className={`field ${errors.confirm ? 'field-invalid' : ''}`}
             />
-            <FieldError message={errors.confirm} />
-          </div>
+          </Field>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-accent-cyan hover:bg-cyan-300 disabled:opacity-50 text-surface-900 font-semibold text-sm rounded-lg py-2.5 transition-all font-mono tracking-wider uppercase"
-          >
-            {loading ? 'Updating...' : 'Update password'}
-          </button>
+          <SubmitButton loading={loading} loadingLabel="Updating…">
+            Update password
+          </SubmitButton>
         </form>
-      </Shell>
+      </AuthShell>
     )
   }
 
   return (
-    <Shell>
-      <h1 className="text-2xl font-semibold text-white mb-1">Reset your password</h1>
-      <p className="text-sm text-gray-500 mb-8 font-mono">
-        We&apos;ll email you a code to set a new one.
-      </p>
-
-      <form onSubmit={handleRequest} noValidate className="space-y-5">
-        <div>
-          <label htmlFor="reset-email" className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-            Email address
-          </label>
+    <AuthShell
+      title="Reset your password"
+      subtitle="We'll email you a code to set a new one."
+      footer={
+        <Link to="/login" className="text-paper-3 hover:text-paper">
+          Back to sign in
+        </Link>
+      }
+    >
+      <form onSubmit={handleRequest} noValidate className="space-y-4">
+        <Field label="Email" error={errors.email}>
           <input
-            id="reset-email"
             type="email"
             autoComplete="email"
             placeholder="analyst@soc.internal"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className={inputClass('email')}
+            className={`field ${errors.email ? 'field-invalid' : ''}`}
           />
-          <FieldError message={errors.email} />
-        </div>
+        </Field>
 
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full bg-accent-blue hover:bg-blue-400 disabled:opacity-50 text-surface-900 font-semibold text-sm rounded-lg py-2.5 transition-all font-mono tracking-wider uppercase"
-        >
-          {loading ? 'Sending...' : 'Send reset code'}
-        </button>
+        <SubmitButton loading={loading} loadingLabel="Sending…">
+          Send reset code
+        </SubmitButton>
       </form>
-
-      <p className="mt-6 text-center text-xs text-gray-500 font-mono">
-        <Link to="/login" className="text-accent-cyan hover:underline">
-          Back to sign in
-        </Link>
-      </p>
-    </Shell>
+    </AuthShell>
   )
 }

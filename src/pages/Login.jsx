@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ShieldAlert, Eye, EyeOff, AlertCircle, Mail } from 'lucide-react'
+import { Eye, EyeOff } from 'lucide-react'
 import { useAuth } from '../context/useAuth'
 import { api } from '../services/api'
+import AuthShell, { Field, Notice, SubmitButton } from '../components/AuthShell'
 
 export default function Login() {
   const { login } = useAuth()
@@ -14,11 +15,16 @@ export default function Login() {
   const [unverifiedEmail, setUnverifiedEmail] = useState('')
   const [resendMsg, setResendMsg] = useState('')
   const [resendCooldown, setResendCooldown] = useState(0)
+  const cooldownTimer = useRef(null)
+
+  // Clear the interval on unmount; the previous version left it running after
+  // the component was gone.
+  useEffect(() => () => clearInterval(cooldownTimer.current), [])
 
   const validate = () => {
     const e = {}
     if (!form.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email))
-      e.email = 'A valid email address is required.'
+      e.email = 'Enter a valid email address.'
     if (!form.password) e.password = 'Enter your password.'
     return e
   }
@@ -34,12 +40,12 @@ export default function Login() {
       await login(form.email, form.password)
       navigate('/')
     } catch (err) {
-      const msg = err.message || 'Invalid credentials'
+      const msg = err.message || 'That email and password did not match.'
       if (msg.includes('not verified')) {
         setUnverifiedEmail(form.email)
         setErrors({})
       } else {
-        setErrors({ email: msg })
+        setErrors({ password: msg })
       }
     } finally {
       setLoading(false)
@@ -51,15 +57,15 @@ export default function Login() {
     setLoading(true)
     try {
       await api.auth.resendOtp({ email: unverifiedEmail })
-      setResendMsg('A new verification code has been sent.')
+      setResendMsg('Sent. Check your inbox.')
     } catch (err) {
-      setErrors({ email: err.message || 'Failed to resend' })
+      setErrors({ email: err.message || 'Could not send the code.' })
     } finally {
       setLoading(false)
       setResendCooldown(60)
-      const timer = setInterval(() => {
+      cooldownTimer.current = setInterval(() => {
         setResendCooldown((prev) => {
-          if (prev <= 1) { clearInterval(timer); return 0 }
+          if (prev <= 1) { clearInterval(cooldownTimer.current); return 0 }
           return prev - 1
         })
       }, 1000)
@@ -77,124 +83,84 @@ export default function Login() {
   })
 
   return (
-    <div className="min-h-screen grid-bg flex items-center justify-center px-4">
-      <div className="w-full max-w-md animate-slide-up">
-        <div className="flex items-center gap-3 mb-10 justify-center">
-          <ShieldAlert className="text-accent-cyan w-8 h-8" />
-          <span className="font-mono text-xl font-semibold tracking-widest uppercase text-accent-cyan">
-            HoneySentinel
-          </span>
+    <AuthShell
+      title="Sign in"
+      subtitle="Captured attacker sessions and threat intelligence for your honeypot nodes."
+      footer={
+        <span className="text-paper-3">
+          No account yet?{' '}
+          <Link to="/signup" className="font-medium text-paper-2 hover:text-paper">
+            Request access
+          </Link>
+        </span>
+      }
+    >
+      {unverifiedEmail && (
+        <div className="mb-5">
+          <Notice tone="warn" title="Verify your email first">
+            We sent a code to{' '}
+            <span className="readout text-paper">{unverifiedEmail}</span>.
+            {resendCooldown > 0 ? (
+              <span className="mt-1.5 block text-paper-3">
+                You can send another in {resendCooldown}s.
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={handleResendOtp}
+                disabled={loading}
+                className="mt-1.5 block font-display font-medium text-paper hover:underline disabled:opacity-50"
+              >
+                Send a new code
+              </button>
+            )}
+            {resendMsg && (
+              <span className="mt-1.5 block text-s1">{resendMsg}</span>
+            )}
+          </Notice>
         </div>
+      )}
 
-        <div className="bg-surface-800 border border-border rounded-xl p-8 glow-blue">
-          <h1 className="text-2xl font-semibold text-white mb-1">Sign in</h1>
-          <p className="text-sm text-gray-500 mb-8 font-mono">
-            Authenticated access only — credentials are verified.
-          </p>
+      <form onSubmit={handleSubmit} noValidate className="space-y-4">
+        <Field label="Email" error={errors.email}>
+          <input
+            type="email"
+            autoComplete="email"
+            placeholder="analyst@soc.internal"
+            className={`field ${errors.email ? 'field-invalid' : ''}`}
+            {...field('email')}
+          />
+        </Field>
 
-          {unverifiedEmail && (
-            <div className="mb-5 bg-accent-orange/10 border border-accent-orange/30 rounded-lg p-4">
-              <div className="flex items-start gap-2">
-                <Mail className="w-4 h-4 text-accent-orange mt-0.5 flex-shrink-0" />
-                <div>
-                  <p className="text-xs font-mono text-accent-orange font-semibold">Email not verified</p>
-                  <p className="text-xs font-mono text-gray-400 mt-1">
-                    Please check your inbox for the verification code.
-                  </p>
-                  {resendCooldown > 0 ? (
-                    <p className="text-xs font-mono text-gray-600 mt-2">
-                      Resend available in {resendCooldown}s
-                    </p>
-                  ) : (
-                    <button
-                      onClick={handleResendOtp}
-                      disabled={loading}
-                      className="mt-2 text-xs font-mono text-accent-blue hover:underline disabled:opacity-50"
-                    >
-                      Resend verification code
-                    </button>
-                  )}
-                  {resendMsg && (
-                    <p className="text-xs font-mono text-accent-green mt-2">{resendMsg}</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} noValidate className="space-y-5">
-            <div>
-              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-                Email Address
-              </label>
-              <input
-                type="email"
-                autoComplete="email"
-                placeholder="analyst@soc.internal"
-                className={`w-full bg-surface-700 border rounded-lg px-4 py-2.5 text-sm text-white placeholder-gray-600 font-mono outline-none transition-all focus:ring-1 focus:ring-accent-blue ${
-                  errors.email ? 'border-accent-red' : 'border-border focus:border-accent-blue'
-                }`}
-                {...field('email')}
-              />
-              {errors.email && (
-                <p className="mt-1.5 flex items-center gap-1 text-xs text-accent-red font-mono">
-                  <AlertCircle className="w-3 h-3" /> {errors.email}
-                </p>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-                Password
-              </label>
-              <div className="relative">
-                <input
-                  type={showPw ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
-                  className={`w-full bg-surface-700 border rounded-lg px-4 py-2.5 pr-10 text-sm text-white placeholder-gray-600 font-mono outline-none transition-all focus:ring-1 focus:ring-accent-blue ${
-                    errors.password ? 'border-accent-red' : 'border-border focus:border-accent-blue'
-                  }`}
-                  {...field('password')}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPw(!showPw)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 transition-colors"
-                >
-                  {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              {errors.password && (
-                <p className="mt-1.5 flex items-center gap-1 text-xs text-accent-red font-mono">
-                  <AlertCircle className="w-3 h-3" /> {errors.password}
-                </p>
-              )}
-            </div>
-
+        <Field label="Password" error={errors.password}>
+          <div className="relative">
+            <input
+              type={showPw ? 'text' : 'password'}
+              autoComplete="current-password"
+              className={`field pr-10 ${errors.password ? 'field-invalid' : ''}`}
+              {...field('password')}
+            />
             <button
-              type="submit"
-              disabled={loading}
-              className="w-full mt-2 bg-accent-blue hover:bg-blue-400 disabled:opacity-50 text-surface-900 font-semibold text-sm rounded-lg py-2.5 transition-all font-mono tracking-wider uppercase"
+              type="button"
+              onClick={() => setShowPw(!showPw)}
+              aria-label={showPw ? 'Hide password' : 'Show password'}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-paper-3 transition-colors hover:text-paper"
             >
-              {loading ? 'Authenticating...' : 'Sign In'}
+              {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
-          </form>
+          </div>
+        </Field>
 
-          <p className="mt-4 text-center text-xs font-mono">
-            <Link to="/forgot-password" className="text-gray-500 hover:text-accent-cyan hover:underline">
-              Forgot your password?
-            </Link>
-          </p>
+        <SubmitButton loading={loading} loadingLabel="Signing in…">
+          Sign in
+        </SubmitButton>
+      </form>
 
-          <p className="mt-3 text-center text-xs text-gray-500 font-mono">
-            No account?{' '}
-            <Link to="/signup" className="text-accent-cyan hover:underline">
-              Request access
-            </Link>
-          </p>
-        </div>
-      </div>
-    </div>
+      <p className="mt-4 text-center text-[13px]">
+        <Link to="/forgot-password" className="text-paper-3 hover:text-paper">
+          Forgot your password?
+        </Link>
+      </p>
+    </AuthShell>
   )
 }
