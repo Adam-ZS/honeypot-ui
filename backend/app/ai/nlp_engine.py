@@ -6,6 +6,8 @@ from collections import Counter
 
 import spacy
 from typing import List, Dict, Optional, Set
+
+from app.ai.deobfuscate import deobfuscate_commands
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -95,7 +97,12 @@ class NLPEngine:
         tool_names: Set[str] = set()
         categories: Set[str] = set()
 
-        full_text = " ".join(commands).lower()[: self.MAX_ANALYSIS_CHARS]
+        # Decode nested encodings first, then match over the original *and*
+        # everything recovered from it. The expert interviews in section V.B.2
+        # asked for exactly this: an outer command is deliberately unremarkable,
+        # and the payload naming the C2 host only appears once it is unwrapped.
+        decoded = deobfuscate_commands(commands)
+        full_text = decoded.combined.lower()[: self.MAX_ANALYSIS_CHARS]
 
         for tool_name, tool_info in OFFENSIVE_TOOLS.items():
             if re.search(tool_info["pattern"], full_text):
@@ -137,6 +144,10 @@ class NLPEngine:
             "extracted_files": files,
             "complexity_score": complexity_score,
             "command_count": len(commands),
+            # Surfaced so an analyst can see the decode chain rather than
+            # having to trust that something was unwrapped.
+            "deobfuscation": decoded.as_dict(),
+            "is_obfuscated": bool(decoded.layers),
         }
 
     def analyze_payload(self, payload: str) -> Dict:
