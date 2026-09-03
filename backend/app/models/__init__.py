@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, JSON, Enum as SAEnum
-from sqlalchemy.dialects.postgresql import UUID, INET
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, Enum as SAEnum
+from sqlalchemy.dialects.postgresql import UUID, INET, JSONB
 from sqlalchemy.orm import relationship
 import enum
 import uuid
@@ -150,24 +150,24 @@ class HoneypotSession(Base):
     is_anomalous = Column(Boolean, default=False)
 
     # NLP results
-    detected_tools = Column(JSON, nullable=True)
-    detected_intents = Column(JSON, nullable=True)
+    detected_tools = Column(JSONB, nullable=True)
+    detected_intents = Column(JSONB, nullable=True)
     command_summary = Column(Text, nullable=True)
     command_count = Column(Integer, default=0, nullable=False)
 
     # MITRE ATT&CK
     #: List of tactic id strings, e.g. ["TA0001"].
-    mitre_tactics = Column(JSON, nullable=True)
+    mitre_tactics = Column(JSONB, nullable=True)
     #: List of technique objects, e.g. [{"id": "T1110", "name": "Brute Force"}].
-    mitre_techniques = Column(JSON, nullable=True)
+    mitre_techniques = Column(JSONB, nullable=True)
 
     # Raw data (encrypted)
     raw_commands_encrypted = Column(Text, nullable=True)
     raw_payloads_encrypted = Column(Text, nullable=True)
-    network_packets_summary = Column(JSON, nullable=True)
+    network_packets_summary = Column(JSONB, nullable=True)
 
     # Uploaded files
-    uploaded_files = Column(JSON, nullable=True)
+    uploaded_files = Column(JSONB, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -192,7 +192,7 @@ class IndicatorOfCompromise(Base):
     confidence = Column(Float, nullable=True)
     first_seen = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    tags = Column(JSON, nullable=True)
+    tags = Column(JSONB, nullable=True)
 
     session = relationship("HoneypotSession", back_populates="iocs")
 
@@ -208,8 +208,8 @@ class Alert(Base):
     status = Column(_pg_enum(AlertStatus), default=AlertStatus.NEW, nullable=False)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     auto_generated = Column(Boolean, default=True)
-    mitre_tactics = Column(JSON, nullable=True)
-    mitre_techniques = Column(JSON, nullable=True)
+    mitre_tactics = Column(JSONB, nullable=True)
+    mitre_techniques = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
@@ -227,7 +227,7 @@ class AuditLog(Base):
     action = Column(String(100), nullable=False)
     resource_type = Column(String(50), nullable=True)
     resource_id = Column(Integer, nullable=True)
-    details = Column(JSON, nullable=True)
+    details = Column(JSONB, nullable=True)
     ip_address = Column(String(45), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

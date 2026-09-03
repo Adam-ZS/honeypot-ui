@@ -18,11 +18,19 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+#: asyncpg takes its TLS setting through connect_args rather than the URL —
+#: a ``?sslmode=`` query parameter is a libpq spelling and asyncpg rejects it.
+_connect_args: dict = {}
+if settings.database_ssl_required:
+    _connect_args["ssl"] = "require"
+    logger.info("Database connections require TLS")
+
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
     pool_recycle=1800,
+    connect_args=_connect_args,
 )
 async_session_factory = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False

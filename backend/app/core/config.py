@@ -133,6 +133,24 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.ENVIRONMENT.strip().lower() not in ("development", "dev", "test")
 
+    @property
+    def database_ssl_required(self) -> bool:
+        """Whether the database connection must be encrypted.
+
+        The captured commands and payloads on that link are the most sensitive
+        data the system holds, and the report commits to TLS for it. Enforced
+        client-side in production so it is guaranteed rather than incidental:
+        managed Postgres providers generally negotiate TLS anyway, but relying
+        on the server to insist is not the same as requiring it.
+
+        Left off in development, where Postgres runs in a container with no
+        certificate and a hard requirement would simply refuse to start.
+        """
+        override = os.environ.get("DATABASE_SSL")
+        if override:
+            return override.strip().lower() in ("1", "true", "require", "required")
+        return self.is_production
+
     def validate_secrets(self) -> None:
         """Refuse to run a real deployment on placeholder credentials.
 

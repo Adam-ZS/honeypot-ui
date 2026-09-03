@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import time
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,9 @@ from app.services.alerting import alerting_service
 from app.core.encryption import encrypt_data
 
 logger = logging.getLogger(__name__)
+
+#: NFR-2: classification turnaround must stay under this after a session ends.
+ANALYSIS_BUDGET_MS = 200
 
 #: A single session's command list is attacker-controlled; cap what we store.
 MAX_COMMANDS = 5000
@@ -58,6 +62,13 @@ class AnalysisPipeline:
         session_data: Dict,
         node_id: int,
     ) -> Dict:
+        # NFR-2 commits the classification path to under 200 ms. Nothing
+        # measured it, so the requirement could not be evaluated at all —
+        # only asserted. This times the analysis span itself: feature
+        # extraction through to the severity decision, excluding the database
+        # write, which is what the requirement is actually about.
+        started = time.perf_counter()
+
         # Import the singletons, not the modules: `from app.ai import
         # classifier` bound the *module* (app/ai/__init__.py is empty), so
         # every call raised AttributeError and no session was ever ingested.
@@ -203,9 +214,21 @@ class AnalysisPipeline:
         if alert_payload is not None:
             await alerting_service.send_alert(alert_payload)
 
+        analysis_ms = (time.perf_counter() - started) * 1000.0
+        if analysis_ms > ANALYSIS_BUDGET_MS:
+            logger.warning(
+                "Session analysis took %.1f ms, over the %d ms NFR-2 budget",
+                analysis_ms,
+                ANALYSIS_BUDGET_MS,
+            )
+
         return {
             "session_id": db_session.id,
             "session_uuid": db_session.session_uuid,
+            # Reported per session so the requirement can be measured over
+            # real traffic rather than estimated from a single run.
+            "analysis_ms": round(analysis_ms, 2),
+            "analysis_within_budget": analysis_ms <= ANALYSIS_BUDGET_MS,
             "ai_classification": ai_result,
             "nlp_analysis": nlp_result,
             "anomaly_detection": anomaly_result,
