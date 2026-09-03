@@ -312,3 +312,33 @@ class TestSettingsParsing:
         """The JSON form worked before NoDecode; it must keep working."""
         settings = self._settings('["https://a.example","https://b.example"]')
         assert settings.CORS_ORIGINS == ["https://a.example", "https://b.example"]
+
+
+def test_enum_columns_persist_values_not_names():
+    """Every enum column must store the member value, matching the migrations.
+
+    SQLAlchemy's default is to store ``member.name`` (``ADMIN``), while every
+    migration creates the Postgres type from lowercase values (``admin``).
+    That mismatch made the deployed app unusable: registration was rejected by
+    Postgres on every INSERT, and reading a row back raised LookupError, so
+    both signup and login returned 500. Assert the two agree.
+    """
+    from app.models import Base
+
+    checked = 0
+    for table in Base.metadata.tables.values():
+        for column in table.columns:
+            enums = getattr(column.type, "enums", None)
+            if not enums:
+                continue
+            python_enum = getattr(column.type, "enum_class", None)
+            if python_enum is None:
+                continue
+            expected = [member.value for member in python_enum]
+            assert enums == expected, (
+                f"{table.name}.{column.name} would persist {enums}, but the "
+                f"migration created the type with {expected}"
+            )
+            checked += 1
+
+    assert checked >= 8, f"expected to check every enum column, saw {checked}"

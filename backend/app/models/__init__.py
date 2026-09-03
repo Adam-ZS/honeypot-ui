@@ -54,6 +54,32 @@ class AlertStatus(str, enum.Enum):
     FALSE_POSITIVE = "false_positive"
 
 
+def _pg_enum(enum_cls):
+    """A Postgres ENUM column that persists the member *value*, not its name.
+
+    SQLAlchemy's default for ``Enum(SomeEnum)`` is to store ``member.name`` —
+    so ``UserRole.ADMIN`` would be written as ``ADMIN``. Every migration in
+    this project creates the Postgres type from the lowercase *values*
+    (``'viewer', 'analyst', 'admin'``), and the server defaults, the JSON the
+    API returns and the filters the dashboard sends are all lowercase too.
+
+    The two never matched, which made the deployed application unusable:
+    every INSERT was rejected by Postgres because ``ANALYST`` is not a label
+    of type ``userrole``, so registration always failed with a 500 and the
+    users table stayed empty; and any row written out-of-band raised
+    ``LookupError: 'admin' is not among the defined enum values`` when the ORM
+    read it back, so login 500'd as well.
+
+    Pinning ``values_callable`` makes the ORM agree with the schema that is
+    already deployed, so no data migration is needed.
+    """
+    return SAEnum(
+        enum_cls,
+        name=enum_cls.__name__.lower(),
+        values_callable=lambda cls: [member.value for member in cls],
+    )
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -61,7 +87,7 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     name = Column(String(255), nullable=True)
-    role = Column(SAEnum(UserRole), default=UserRole.ANALYST, nullable=False)
+    role = Column(_pg_enum(UserRole), default=UserRole.ANALYST, nullable=False)
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -83,7 +109,7 @@ class HoneypotNode(Base):
     protocol = Column(String(50), nullable=False)
     ip_address = Column(String(45), nullable=False, index=True)
     port = Column(Integer, nullable=False)
-    mode = Column(SAEnum(HoneypotMode), default=HoneypotMode.ACTIVE, nullable=False)
+    mode = Column(_pg_enum(HoneypotMode), default=HoneypotMode.ACTIVE, nullable=False)
     is_active = Column(Boolean, default=True)
     location_lat = Column(Float, nullable=True)
     location_lon = Column(Float, nullable=True)
@@ -111,15 +137,15 @@ class HoneypotSession(Base):
     geo_city = Column(String(100), nullable=True)
     geo_lat = Column(Float, nullable=True)
     geo_lon = Column(Float, nullable=True)
-    status = Column(SAEnum(SessionStatus), default=SessionStatus.ACTIVE, nullable=False)
+    status = Column(_pg_enum(SessionStatus), default=SessionStatus.ACTIVE, nullable=False)
     started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     duration_seconds = Column(Float, nullable=True)
 
     # AI Analysis results
-    attack_category = Column(SAEnum(AttackCategory), nullable=True)
+    attack_category = Column(_pg_enum(AttackCategory), nullable=True)
     attack_confidence = Column(Float, nullable=True)
-    attacker_profile = Column(SAEnum(AttackerProfile), nullable=True)
+    attacker_profile = Column(_pg_enum(AttackerProfile), nullable=True)
     anomaly_score = Column(Float, nullable=True)
     is_anomalous = Column(Boolean, default=False)
 
@@ -176,10 +202,10 @@ class Alert(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, ForeignKey("honeypot_sessions.id"), nullable=False)
-    severity = Column(SAEnum(AttackSeverity), nullable=False)
+    severity = Column(_pg_enum(AttackSeverity), nullable=False)
     title = Column(String(500), nullable=False)
     description = Column(Text, nullable=True)
-    status = Column(SAEnum(AlertStatus), default=AlertStatus.NEW, nullable=False)
+    status = Column(_pg_enum(AlertStatus), default=AlertStatus.NEW, nullable=False)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     auto_generated = Column(Boolean, default=True)
     mitre_tactics = Column(JSON, nullable=True)
@@ -213,7 +239,7 @@ class AlertThreshold(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(100), nullable=False, unique=True)
-    min_severity = Column(SAEnum(AttackSeverity), default=AttackSeverity.MEDIUM)
+    min_severity = Column(_pg_enum(AttackSeverity), default=AttackSeverity.MEDIUM)
     anomaly_score_threshold = Column(Float, default=0.7)
     email_enabled = Column(Boolean, default=True)
     webhook_enabled = Column(Boolean, default=False)
