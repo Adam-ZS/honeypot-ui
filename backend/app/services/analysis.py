@@ -117,6 +117,18 @@ class AnalysisPipeline:
             session_data, nlp_result, ai_result
         )
 
+        # Behavioural clustering runs alongside the rule-based profile rather
+        # than replacing it, and the two are reported separately. The scorecard
+        # is interpretable and works on the first session ever seen; clustering
+        # cannot do either, but it groups sessions that behave alike without
+        # anyone deciding in advance what alike means — which is how a campaign
+        # reusing one toolkit becomes visible across many sessions.
+        from app.ai.clustering import clusterer, extract as extract_behaviour
+
+        cluster_result = clusterer.assign(
+            extract_behaviour(session_data, nlp_result)
+        )
+
         mitre_result = mitre_mapper.map_analysis(nlp_result, ai_result, session_data)
 
         iocs = self._extract_iocs(attacker_ip, nlp_result, session_data)
@@ -233,6 +245,7 @@ class AnalysisPipeline:
             "nlp_analysis": nlp_result,
             "anomaly_detection": anomaly_result,
             "attacker_profile": profile_result,
+            "behavioural_cluster": cluster_result,
             "mitre_attack": mitre_result,
             "severity": severity.value,
             "iocs": iocs,

@@ -455,3 +455,26 @@ def test_enrichment_is_disabled_without_an_endpoint():
     client = ChimeraClient()
     client._settings = type("S", (), {"CHIMERA_URL": ""})()
     assert client.enabled is False
+
+
+def test_clusterer_reports_unfitted_rather_than_inventing_a_cluster():
+    """No model must mean "no answer", not cluster 0 for every session.
+
+    Section VI.B claims behavioural clustering; the code had a threshold
+    scorecard named CLUSTER_RULES and no algorithm. Now that clustering is
+    real, the failure mode to avoid is the project's recurring one — reporting
+    a confident value that measures nothing.
+    """
+    import numpy as np
+
+    from app.ai.clustering import MIN_SESSIONS_TO_FIT, BehaviouralClusterer
+
+    fresh = BehaviouralClusterer()
+    fresh._loaded = True  # skip disk load
+    result = fresh.assign(np.zeros(10))
+
+    assert result["fitted"] is False
+    assert result["cluster"] is None
+
+    with pytest.raises(ValueError, match="at least"):
+        fresh.fit(np.random.rand(MIN_SESSIONS_TO_FIT - 1, 10))
