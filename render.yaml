@@ -29,6 +29,17 @@ services:
       # cold start refitted them.
       cd backend
       mkdir -p models data
+      # Fetch GeoLite2 when a licence key is configured. Without it sessions
+      # are stored with no location rather than a fabricated one, and the map
+      # has nothing to plot — which is finding 17.
+      if [ -n "$MAXMIND_LICENSE_KEY" ]; then
+        curl -fsSL "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=$MAXMIND_LICENSE_KEY&suffix=tar.gz" \
+          -o /tmp/geo.tar.gz && tar -xzf /tmp/geo.tar.gz -C /tmp \
+          && find /tmp -name '*.mmdb' -exec mv {} ./data/GeoLite2-City.mmdb \; \
+          && echo "GeoLite2 installed" || echo "GeoLite2 download failed; locations will be null"
+      else
+        echo "MAXMIND_LICENSE_KEY unset; sessions will have no location"
+      fi
       # Fit the bootstrap models at build time so the first request does not
       # pay for training.
       python -c "
@@ -77,6 +88,10 @@ services:
       # stored with no location rather than a fabricated one.
       - key: GEOIP_DB_PATH
         value: ./data/GeoLite2-City.mmdb
+      # Free key from https://www.maxmind.com/en/geolite2/signup. Without it
+      # the Live Map has no coordinates to plot.
+      - key: MAXMIND_LICENSE_KEY
+        sync: false
       # Optional alerting. Leave unset to disable.
       - key: ALERT_EMAIL_FROM
         sync: false
