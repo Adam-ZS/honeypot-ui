@@ -87,9 +87,9 @@ export default function Login() {
       title="Sign in"
       subtitle="Captured attacker sessions and threat intelligence for your honeypot nodes."
       footer={
-        <span className="text-bone-mute">
+        <span className="text-paper-3">
           No account yet?{' '}
-          <Link to="/signup" className="font-medium text-bone-dim hover:text-signal">
+          <Link to="/signup" className="font-medium text-paper-2 hover:text-paper">
             Request access
           </Link>
         </span>
@@ -99,9 +99,9 @@ export default function Login() {
         <div className="mb-5">
           <Notice tone="warn" title="Verify your email first">
             We sent a code to{' '}
-            <span className="readout text-bone">{unverifiedEmail}</span>.
+            <span className="readout text-paper">{unverifiedEmail}</span>.
             {resendCooldown > 0 ? (
-              <span className="mt-1.5 block text-bone-mute">
+              <span className="mt-1.5 block text-paper-3">
                 You can send another in {resendCooldown}s.
               </span>
             ) : (
@@ -109,13 +109,13 @@ export default function Login() {
                 type="button"
                 onClick={handleResendOtp}
                 disabled={loading}
-                className="mt-1.5 block font-display font-medium text-signal hover:underline disabled:opacity-50"
+                className="mt-1.5 block font-display font-medium text-paper hover:underline disabled:opacity-50"
               >
                 Send a new code
               </button>
             )}
             {resendMsg && (
-              <span className="mt-1.5 block text-sev-low">{resendMsg}</span>
+              <span className="mt-1.5 block text-s1">{resendMsg}</span>
             )}
           </Notice>
         </div>
@@ -144,7 +144,7 @@ export default function Login() {
               type="button"
               onClick={() => setShowPw(!showPw)}
               aria-label={showPw ? 'Hide password' : 'Show password'}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-bone-mute transition-colors hover:text-bone"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-paper-3 transition-colors hover:text-paper"
             >
               {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
@@ -157,7 +157,7 @@ export default function Login() {
       </form>
 
       <p className="mt-4 text-center text-[13px]">
-        <Link to="/forgot-password" className="text-bone-mute hover:text-signal">
+        <Link to="/forgot-password" className="text-paper-3 hover:text-paper">
           Forgot your password?
         </Link>
       </p>

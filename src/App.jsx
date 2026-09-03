@@ -16,7 +16,7 @@ function AuthRoutes() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-void">
+      <div className="flex min-h-screen items-center justify-center bg-ink-0">
         <Spinner label="Starting HoneySentinel" />
       </div>
     )

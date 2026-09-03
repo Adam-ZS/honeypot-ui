@@ -1,44 +1,37 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { useEffect, useRef, useState } from 'react'
-import {
-  LayoutDashboard, Map, FileText, Settings,
-  Bell, ChevronDown, LogOut, Menu, X,
-} from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Bell, ChevronUp, LogOut, Menu, X } from 'lucide-react'
 import { useAuth } from '../context/useAuth'
 import { api } from '../services/api'
 
 const NAV = [
-  { to: '/', label: 'Overview', icon: LayoutDashboard },
-  { to: '/map', label: 'Origins', icon: Map },
-  { to: '/sessions', label: 'Sessions', icon: FileText },
-  { to: '/settings', label: 'Settings', icon: Settings },
+  { to: '/', label: 'Overview' },
+  { to: '/sessions', label: 'Sessions' },
+  { to: '/map', label: 'Origins' },
+  { to: '/settings', label: 'Settings' },
 ]
 
 const STATUS_POLL_MS = 30000
 
-/** The console's mark: a hexagonal cell, drawn rather than pulled from an icon set. */
+/** The console's mark: a cell, drawn rather than pulled from an icon set. */
 function Mark({ className = '' }) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true" fill="none">
       <path
-        d="M12 2.6 20.5 7.3v9.4L12 21.4 3.5 16.7V7.3L12 2.6Z"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinejoin="round"
+        d="M12 2.4 20.8 7.2v9.6L12 21.6 3.2 16.8V7.2L12 2.4Z"
+        stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"
       />
-      <path
-        d="M12 8.2 16 10.4v4.4L12 17l-4-2.2v-4.4L12 8.2Z"
-        fill="currentColor"
-        opacity="0.9"
-      />
+      <path d="M12 8 16.4 10.4v4.8L12 17.6 7.6 15.2v-4.8L12 8Z" fill="currentColor" />
     </svg>
   )
 }
 
 /**
- * Persistent engine readout. This is the one fact that is always relevant
- * regardless of which page an analyst is on — if the engine is down, nothing
- * else on screen is being updated — so it stays pinned in the rail.
+ * Engine readout, pinned in the rail.
+ *
+ * This is the one fact that stays relevant on every page: if the engine is
+ * down, nothing else on screen is being updated. It sits above the account
+ * block so it is the last thing in the reading order before the fold.
  */
 function EngineReadout({ engine, nodeCount }) {
   const state =
@@ -46,11 +39,11 @@ function EngineReadout({ engine, nodeCount }) {
       : !engine.reachable ? 'unreachable'
         : engine.running ? 'running' : 'stopped'
 
-  const dot = {
-    unknown: 'bg-bone-mute',
-    unreachable: 'bg-sev-critical',
-    stopped: 'bg-sev-high',
-    running: 'bg-sev-low pulse-live',
+  const tone = {
+    unknown: 'var(--color-paper-3)',
+    unreachable: 'var(--color-s4)',
+    stopped: 'var(--color-s3)',
+    running: 'var(--color-s1)',
   }[state]
 
   const text = {
@@ -61,26 +54,28 @@ function EngineReadout({ engine, nodeCount }) {
   }[state]
 
   return (
-    <div className="border-t border-rule-soft px-4 py-3.5">
+    <div className="border-t border-line px-4 py-3.5">
       <div className="flex items-center gap-2">
-        <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} aria-hidden="true" />
-        <span className="font-display text-[13px] font-medium text-bone">{text}</span>
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${state === 'running' ? 'pulse-live' : ''}`}
+          style={{ background: tone }}
+          aria-hidden="true"
+        />
+        <span className="text-[13px] font-medium text-paper">{text}</span>
       </div>
-
-      <dl className="mt-2.5 space-y-1">
-        <div className="flex items-baseline justify-between gap-2">
-          <dt className="font-display text-xs text-bone-mute">Nodes</dt>
-          <dd className="readout text-xs text-bone-dim">
-            {nodeCount === null ? '—' : nodeCount}
-          </dd>
-        </div>
-        <div className="flex items-baseline justify-between gap-2">
-          <dt className="font-display text-xs text-bone-mute">Protocols</dt>
-          <dd className="readout truncate text-xs uppercase text-bone-dim">
-            {engine?.protocols?.length ? engine.protocols.join(' · ') : '—'}
-          </dd>
-        </div>
-      </dl>
+      <div className="mt-2 flex items-baseline gap-1.5">
+        <span className="readout text-[11px] text-paper-2">
+          {nodeCount === null ? '—' : nodeCount}
+        </span>
+        <span className="text-[11px] text-paper-3">
+          {nodeCount === 1 ? 'node' : 'nodes'}
+        </span>
+        {engine?.protocols?.length > 0 && (
+          <span className="readout ml-auto truncate text-[11px] uppercase text-paper-3">
+            {engine.protocols.join(' ')}
+          </span>
+        )}
+      </div>
     </div>
   )
 }
@@ -88,12 +83,11 @@ function EngineReadout({ engine, nodeCount }) {
 export default function DashboardLayout() {
   const { user, logout } = useAuth()
   const [railOpen, setRailOpen] = useState(false)
-  const [profileOpen, setProfileOpen] = useState(false)
+  const [accountOpen, setAccountOpen] = useState(false)
   const [engine, setEngine] = useState(null)
   const [nodeCount, setNodeCount] = useState(null)
   const [newAlerts, setNewAlerts] = useState(0)
   const location = useLocation()
-  const profileRef = useRef(null)
 
   useEffect(() => {
     let cancelled = false
@@ -118,76 +112,81 @@ export default function DashboardLayout() {
     }
   }, [])
 
-  // Dismiss the profile menu on Escape, matching the modal's behaviour.
   useEffect(() => {
-    if (!profileOpen) return undefined
-    const onKey = (e) => { if (e.key === 'Escape') setProfileOpen(false) }
+    if (!accountOpen) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') setAccountOpen(false) }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [profileOpen])
-
-  const page = NAV.find((n) => n.to === location.pathname)
+  }, [accountOpen])
 
   return (
-    <div className="flex h-screen overflow-hidden bg-void">
+    <div className="flex h-screen overflow-hidden bg-ink-0">
       {railOpen && (
         <div
-          className="fixed inset-0 z-20 bg-void/80 lg:hidden"
+          className="fixed inset-0 z-20 bg-ink-0/85 lg:hidden"
           onClick={() => setRailOpen(false)}
           role="presentation"
         />
       )}
 
+      {/*
+        There is no top bar. The page title it used to hold is already the
+        active nav item, and the account menu and alert count live down here —
+        which buys back a full row of vertical space on every screen.
+      */}
       <aside
-        className={`fixed inset-y-0 left-0 z-30 flex w-56 flex-col border-r border-rule-soft bg-panel transition-transform duration-200 lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-30 flex w-52 flex-col border-r border-line bg-ink-1 transition-transform duration-200 lg:static lg:translate-x-0 ${
           railOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-rule-soft px-4">
-          <Mark className="h-[22px] w-[22px] text-signal" />
-          <span className="font-display text-[17px] font-semibold leading-none tracking-tight text-bone">
+        <div className="flex items-center gap-2 px-4 pb-3 pt-4">
+          <Mark className="h-[18px] w-[18px] shrink-0 text-paper" />
+          <span className="font-display text-[15px] font-semibold leading-none tracking-tight text-paper">
             HoneySentinel
           </span>
           <button
             type="button"
             onClick={() => setRailOpen(false)}
-            className="ml-auto text-bone-mute hover:text-bone lg:hidden"
+            className="ml-auto text-paper-3 hover:text-paper lg:hidden"
             aria-label="Close menu"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <nav className="flex-1 overflow-y-auto p-2">
-          {NAV.map(({ to, label, icon: Icon }) => (
+        <nav className="flex-1 overflow-y-auto px-2 py-2">
+          {NAV.map(({ to, label }) => (
             <NavLink
               key={to}
               to={to}
               end={to === '/'}
-              // Closing the rail here rather than in an effect on the path:
-              // it is a response to the tap, so it belongs in the handler and
-              // costs no extra render pass.
+              // Closed from the handler rather than an effect on the path:
+              // it answers the tap, so it costs no extra render pass.
               onClick={() => setRailOpen(false)}
               className={({ isActive }) =>
-                `relative flex items-center gap-2.5 rounded-[2px] px-2.5 py-2 font-display text-sm font-medium transition-colors ${
+                `relative block rounded-[3px] py-1.5 pl-3.5 pr-2.5 font-display text-[15px] transition-colors ${
                   isActive
-                    ? 'bg-raised text-bone'
-                    : 'text-bone-dim hover:bg-raised/60 hover:text-bone'
+                    ? 'font-semibold text-paper'
+                    : 'font-medium text-paper-2 hover:text-paper'
                 }`
               }
             >
               {({ isActive }) => (
                 <>
-                  {/* The active marker is the accent, spent once: a filled
-                      bar against the rail rather than a tinted background. */}
+                  {/* Active state is an ivory bar against the rule. The
+                      interface has no accent hue to spend on chrome. */}
                   <span
-                    className={`absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r ${
-                      isActive ? 'bg-signal' : 'bg-transparent'
+                    className={`absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 ${
+                      isActive ? 'bg-paper' : 'bg-transparent'
                     }`}
                     aria-hidden="true"
                   />
-                  <Icon className="h-4 w-4 shrink-0" strokeWidth={1.75} />
                   {label}
+                  {to === '/sessions' && newAlerts > 0 && (
+                    <span className="readout ml-2 align-middle text-[11px] text-s4">
+                      {newAlerts > 99 ? '99+' : newAlerts}
+                    </span>
+                  )}
                 </>
               )}
             </NavLink>
@@ -195,98 +194,80 @@ export default function DashboardLayout() {
         </nav>
 
         <EngineReadout engine={engine} nodeCount={nodeCount} />
+
+        <div className="relative border-t border-line">
+          <button
+            type="button"
+            onClick={() => setAccountOpen((open) => !open)}
+            aria-expanded={accountOpen}
+            aria-haspopup="menu"
+            className="flex w-full items-center gap-2.5 px-4 py-3 text-left transition-colors hover:bg-ink-2"
+          >
+            <span className="readout flex h-6 w-6 shrink-0 items-center justify-center rounded-[3px] bg-ink-3 text-[11px] font-semibold text-paper">
+              {user?.email?.[0]?.toUpperCase() || '?'}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px] text-paper">
+                {user?.email || ''}
+              </span>
+              <span className="block text-[11px] capitalize text-paper-3">
+                {user?.role || 'analyst'}
+              </span>
+            </span>
+            <ChevronUp
+              className={`h-3.5 w-3.5 shrink-0 text-paper-3 transition-transform ${accountOpen ? '' : 'rotate-180'}`}
+            />
+          </button>
+
+          {accountOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setAccountOpen(false)}
+                role="presentation"
+              />
+              <div
+                role="menu"
+                className="panel absolute bottom-full left-2 right-2 z-50 mb-1 overflow-hidden"
+              >
+                <NavLink
+                  to="/sessions"
+                  role="menuitem"
+                  onClick={() => setAccountOpen(false)}
+                  className="flex items-center gap-2 px-3 py-2 text-[13px] font-medium text-paper-2 transition-colors hover:bg-ink-2 hover:text-paper"
+                >
+                  <Bell className="h-3.5 w-3.5" strokeWidth={1.75} />
+                  {newAlerts > 0 ? `${newAlerts} unread alerts` : 'No unread alerts'}
+                </NavLink>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { logout(); setAccountOpen(false) }}
+                  className="flex w-full items-center gap-2 border-t border-line px-3 py-2 text-[13px] font-medium text-paper-2 transition-colors hover:bg-ink-2 hover:text-s4"
+                >
+                  <LogOut className="h-3.5 w-3.5" strokeWidth={1.75} />
+                  Sign out
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-rule-soft bg-panel px-4 lg:px-6">
-          <div className="flex min-w-0 items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setRailOpen(true)}
-              className="text-bone-dim hover:text-bone lg:hidden"
-              aria-label="Open menu"
-            >
-              <Menu className="h-5 w-5" />
-            </button>
-            <h1 className="truncate text-lg font-semibold leading-none text-bone">
-              {page?.label ?? 'Overview'}
-            </h1>
-          </div>
+        <button
+          type="button"
+          onClick={() => setRailOpen(true)}
+          className="control absolute left-3 top-3 z-10 lg:hidden"
+          aria-label="Open menu"
+        >
+          <Menu className="h-4 w-4" />
+        </button>
 
-          <div className="flex items-center gap-1.5">
-            <NavLink
-              to="/sessions"
-              className="relative rounded-[2px] p-2 text-bone-dim transition-colors hover:text-bone"
-              aria-label={
-                newAlerts > 0
-                  ? `${newAlerts} unacknowledged alerts. Go to sessions.`
-                  : 'No unacknowledged alerts'
-              }
-            >
-              <Bell className="h-[18px] w-[18px]" strokeWidth={1.75} />
-              {newAlerts > 0 && (
-                <span className="readout absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-sev-critical px-1 text-[10px] font-semibold text-bone">
-                  {newAlerts > 99 ? '99+' : newAlerts}
-                </span>
-              )}
-            </NavLink>
-
-            <div className="relative" ref={profileRef}>
-              <button
-                type="button"
-                onClick={() => setProfileOpen((open) => !open)}
-                aria-expanded={profileOpen}
-                aria-haspopup="menu"
-                className="flex items-center gap-2 rounded-[2px] border border-rule px-2 py-1.5 transition-colors hover:border-bone-mute"
-              >
-                <span className="readout flex h-5 w-5 shrink-0 items-center justify-center rounded-[2px] bg-signal text-[11px] font-semibold text-void">
-                  {user?.email?.[0]?.toUpperCase() || '?'}
-                </span>
-                <span className="hidden max-w-[140px] truncate font-display text-[13px] text-bone-dim sm:block">
-                  {user?.email || ''}
-                </span>
-                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-bone-mute" />
-              </button>
-
-              {profileOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-40"
-                    onClick={() => setProfileOpen(false)}
-                    role="presentation"
-                  />
-                  <div
-                    role="menu"
-                    className="panel absolute right-0 z-50 mt-1.5 w-60 shadow-2xl shadow-void/60"
-                  >
-                    <div className="border-b border-rule-soft px-3.5 py-3">
-                      <p className="font-display text-xs text-bone-mute">Signed in as</p>
-                      <p className="readout mt-0.5 truncate text-[13px] text-bone">
-                        {user?.email}
-                      </p>
-                      <span className="tag mt-2 capitalize" style={{ color: 'var(--color-signal)' }}>
-                        {user?.role || 'analyst'}
-                      </span>
-                    </div>
-                    <div className="p-1.5">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => { logout(); setProfileOpen(false) }}
-                        className="flex w-full items-center gap-2 rounded-[2px] px-2.5 py-2 font-display text-sm font-medium text-bone-dim transition-colors hover:bg-raised hover:text-sev-critical"
-                      >
-                        <LogOut className="h-4 w-4" strokeWidth={1.75} />
-                        Sign out
-                      </button>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </header>
-
-        <main className="flex-1 overflow-y-auto p-4 lg:p-6">
+        <main
+          key={location.pathname}
+          className="flex-1 overflow-y-auto px-4 pb-6 pt-14 lg:px-6 lg:pt-6"
+        >
           <Outlet />
         </main>
       </div>

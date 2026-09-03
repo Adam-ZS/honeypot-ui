@@ -1,15 +1,14 @@
 /**
- * An empty screen is an invitation to act, not an apology. Each use says what
- * would put something here.
+ * An empty screen is an invitation, not an apology. Each use says what would
+ * put something here.
  */
 export default function EmptyState({ title, hint, action }) {
   return (
-    <div className="px-4 py-12 text-center">
-      {/* A drawn mark rather than a generic inbox glyph: an empty cell, which
-          is what this console is actually reporting. */}
+    <div className="px-4 py-14 text-center">
+      {/* An empty cell — what the console is actually reporting. */}
       <svg
         viewBox="0 0 32 32"
-        className="mx-auto h-7 w-7 text-rule"
+        className="mx-auto h-7 w-7 text-line-2"
         fill="none"
         aria-hidden="true"
       >
@@ -21,9 +20,9 @@ export default function EmptyState({ title, hint, action }) {
           strokeDasharray="3 3"
         />
       </svg>
-      <p className="mt-3 font-display text-[15px] font-medium text-bone-dim">{title}</p>
+      <p className="mt-3.5 font-display text-[15px] font-semibold text-paper-2">{title}</p>
       {hint && (
-        <p className="mx-auto mt-1 max-w-sm text-[13px] leading-relaxed text-bone-mute">
+        <p className="mx-auto mt-1 max-w-xs text-[13px] leading-relaxed text-paper-3">
           {hint}
         </p>
       )}

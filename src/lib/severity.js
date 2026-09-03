@@ -1,27 +1,32 @@
 /*
- * Severity and category vocabulary.
+ * Threat vocabulary.
  *
- * Kept apart from the components that render it so a module can import the
- * scale without importing JSX — and so fast refresh keeps working, which it
- * does not for a file mixing components with plain exports.
+ * Severity and category share one cool-to-hot ramp, because they answer the
+ * same question at different resolutions: how bad is this. Nothing else in
+ * the interface is allowed a saturated colour, so a hue on screen always
+ * means threat level and never decoration.
+ *
+ * Kept free of JSX so any module can import the scale, and so fast refresh
+ * keeps working for the components that render it.
  */
 
-/** Ascending. Index in this array is the magnitude the rail draws. */
+/** Ascending. Index here is the magnitude the rail draws. */
 export const SEVERITY_ORDER = ['low', 'medium', 'high', 'critical']
 
 export const SEVERITY_COLOR = {
-  low: 'var(--color-sev-low)',
-  medium: 'var(--color-sev-medium)',
-  high: 'var(--color-sev-high)',
-  critical: 'var(--color-sev-critical)',
+  low: 'var(--color-s1)',
+  medium: 'var(--color-s2)',
+  high: 'var(--color-s3)',
+  critical: 'var(--color-s4)',
 }
 
-/** Attack category is a kind, not a magnitude — labels, not a scale. */
+/** Categories map onto the same ramp, ordered benign → exfiltration. */
 export const CATEGORY_COLOR = {
-  benign: 'var(--color-cat-benign)',
-  reconnaissance: 'var(--color-cat-recon)',
-  exploitation: 'var(--color-cat-exploit)',
-  exfiltration: 'var(--color-cat-exfil)',
+  benign: 'var(--color-s1)',
+  reconnaissance: 'var(--color-s2)',
+  exploitation: 'var(--color-s3)',
+  exfiltration: 'var(--color-s4)',
+  unknown: 'var(--color-paper-3)',
 }
 
 export const CATEGORY_LABEL = {
@@ -32,7 +37,7 @@ export const CATEGORY_LABEL = {
   unknown: 'Unclassified',
 }
 
-/** Order the proportion bar by threat rather than count, so it reads consistently. */
+/** Hot first: the proportion bar leads with what matters most. */
 export const CATEGORY_ORDER = [
   'exfiltration',
   'exploitation',
@@ -49,11 +54,26 @@ export const PROFILE_LABEL = {
   unknown: 'Unknown',
 }
 
-/** Short forms for the sessions table, where the column is narrow. */
 export const PROFILE_LABEL_SHORT = {
   automated_bot: 'Bot',
   script_kiddie: 'Script kiddie',
   skilled_attacker: 'Skilled',
   apt: 'APT',
   unknown: 'Unknown',
+}
+
+/**
+ * Whether a profile implies a person at a keyboard rather than a script.
+ * This is the distinction a tier-1 analyst is actually triaging for, so the
+ * feed marks it explicitly.
+ */
+export const HANDS_ON_PROFILES = new Set(['skilled_attacker', 'apt'])
+
+/** Compact relative time. Sessions are read in the minutes after they land. */
+export function timeAgo(iso) {
+  const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+  if (seconds < 60) return `${Math.floor(seconds)}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
+  return `${Math.floor(seconds / 86400)}d`
 }

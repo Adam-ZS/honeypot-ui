@@ -23,11 +23,11 @@ function Mark({ className = '' }) {
 
 export default function AuthShell({ title, subtitle, children, footer }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-void px-4 py-10">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-ink-0 px-4 py-10">
       <div className="w-full max-w-sm">
         <div className="mb-7 flex items-center gap-2.5">
-          <Mark className="h-6 w-6 shrink-0 text-signal" />
-          <span className="font-display text-lg font-semibold leading-none tracking-tight text-bone">
+          <Mark className="h-6 w-6 shrink-0 text-paper" />
+          <span className="text-lg font-semibold leading-none tracking-tight text-paper">
             HoneySentinel
           </span>
         </div>
@@ -36,10 +36,10 @@ export default function AuthShell({ title, subtitle, children, footer }) {
           {/* Omitted on terminal steps, where <Outcome> supplies its own
               heading and this frame is only the surround. */}
           {title && (
-            <h1 className="text-2xl font-semibold leading-tight text-bone">{title}</h1>
+            <h1 className="text-2xl font-semibold leading-tight text-paper">{title}</h1>
           )}
           {subtitle && (
-            <p className="mt-1.5 text-sm leading-relaxed text-bone-dim">{subtitle}</p>
+            <p className="mt-1.5 text-sm leading-relaxed text-paper-2">{subtitle}</p>
           )}
           <div className={title ? 'mt-6' : ''}>{children}</div>
         </div>
@@ -54,12 +54,12 @@ export default function AuthShell({ title, subtitle, children, footer }) {
 export function Field({ label, error, hint, children }) {
   return (
     <label className="block">
-      <span className="label">{label}</span>
+      <span className="eyebrow">{label}</span>
       <div className="mt-1.5">{children}</div>
       {error ? (
-        <span className="mt-1.5 block text-[13px] text-sev-critical">{error}</span>
+        <span className="mt-1.5 block text-[13px] text-s4">{error}</span>
       ) : hint ? (
-        <span className="mt-1.5 block text-[13px] text-bone-mute">{hint}</span>
+        <span className="mt-1.5 block text-[13px] text-paper-3">{hint}</span>
       ) : null}
     </label>
   )
@@ -105,7 +105,7 @@ export function Outcome({ title, children, action }) {
     <div className="text-center">
       <svg
         viewBox="0 0 32 32"
-        className="mx-auto h-10 w-10 text-sev-low"
+        className="mx-auto h-10 w-10 text-s1"
         fill="none"
         aria-hidden="true"
       >
@@ -123,8 +123,8 @@ export function Outcome({ title, children, action }) {
           strokeLinejoin="round"
         />
       </svg>
-      <h1 className="mt-4 text-2xl font-semibold text-bone">{title}</h1>
-      <p className="mx-auto mt-1.5 max-w-xs text-sm leading-relaxed text-bone-dim">
+      <h1 className="mt-4 text-2xl font-semibold text-paper">{title}</h1>
+      <p className="mx-auto mt-1.5 max-w-xs text-sm leading-relaxed text-paper-2">
         {children}
       </p>
       <div className="mt-6">{action}</div>
@@ -135,12 +135,12 @@ export function Outcome({ title, children, action }) {
 /** A non-error status message: a code was sent, an account was created. */
 export function Notice({ tone = 'info', title, children }) {
   const color =
-    tone === 'success' ? 'var(--color-sev-low)'
-      : tone === 'warn' ? 'var(--color-sev-high)'
-        : 'var(--color-signal)'
+    tone === 'success' ? 'var(--color-s1)'
+      : tone === 'warn' ? 'var(--color-s3)'
+        : 'var(--color-paper)'
 
   return (
-    <div className="flex gap-2.5 rounded-[3px] border border-rule bg-void px-3.5 py-3">
+    <div className="flex gap-2.5 rounded-[3px] border border-line bg-ink-0 px-3.5 py-3">
       <span
         className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
         style={{ background: color }}
@@ -148,9 +148,9 @@ export function Notice({ tone = 'info', title, children }) {
       />
       <div className="min-w-0">
         {title && (
-          <p className="font-display text-[13px] font-semibold text-bone">{title}</p>
+          <p className="text-[13px] font-semibold text-paper">{title}</p>
         )}
-        <div className="text-[13px] leading-relaxed text-bone-dim">{children}</div>
+        <div className="text-[13px] leading-relaxed text-paper-2">{children}</div>
       </div>
     </div>
   )

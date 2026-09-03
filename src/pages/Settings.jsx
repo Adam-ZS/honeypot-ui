@@ -21,9 +21,9 @@ function Panel({ title, description, action, children }) {
     <section className="panel">
       <div className="panel-head">
         <div>
-          <h2 className="text-base font-semibold text-bone">{title}</h2>
+          <h2 className="text-base font-semibold text-paper">{title}</h2>
           {description && (
-            <p className="mt-0.5 max-w-xl text-[13px] text-bone-mute">{description}</p>
+            <p className="mt-0.5 max-w-xl text-[13px] text-paper-3">{description}</p>
           )}
         </div>
         {action}
@@ -44,9 +44,9 @@ function Toggle({ checked, onChange, disabled, icon: Icon, children }) {
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
-        className="h-3.5 w-3.5 accent-signal"
+        className="h-3.5 w-3.5 accent-paper"
       />
-      <span className="flex items-center gap-1.5 font-display text-[13px] font-medium text-bone-dim">
+      <span className="flex items-center gap-1.5 text-[13px] font-medium text-paper-2">
         <Icon className="h-3.5 w-3.5" strokeWidth={1.75} />
         {children}
       </span>
@@ -60,7 +60,7 @@ function ThresholdForm({ value, onChange, onSubmit, onCancel, submitLabel }) {
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="flex flex-col gap-1">
-          <span className="label">Name</span>
+          <span className="eyebrow">Name</span>
           <input
             type="text"
             value={value.name}
@@ -71,7 +71,7 @@ function ThresholdForm({ value, onChange, onSubmit, onCancel, submitLabel }) {
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="label">Alert at or above</span>
+          <span className="eyebrow">Alert at or above</span>
           <select
             value={value.min_severity}
             onChange={(e) => onChange({ ...value, min_severity: e.target.value })}
@@ -82,7 +82,7 @@ function ThresholdForm({ value, onChange, onSubmit, onCancel, submitLabel }) {
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="label">Anomaly score above</span>
+          <span className="eyebrow">Anomaly score above</span>
           <input
             type="number"
             step="0.05"
@@ -131,7 +131,7 @@ function ThresholdForm({ value, onChange, onSubmit, onCancel, submitLabel }) {
         <button
           type="button"
           onClick={onCancel}
-          className="font-display text-[13px] font-medium text-bone-dim transition-colors hover:text-bone"
+          className="text-[13px] font-medium text-paper-2 transition-colors hover:text-paper"
         >
           Cancel
         </button>
@@ -156,7 +156,7 @@ function ThresholdRow({ threshold, onUpdate, onDelete, canEdit }) {
 
   if (editing) {
     return (
-      <div className="border-b border-rule-soft p-4 last:border-0">
+      <div className="border-b border-line p-4 last:border-0">
         <ThresholdForm
           value={form}
           onChange={setForm}
@@ -174,24 +174,24 @@ function ThresholdRow({ threshold, onUpdate, onDelete, canEdit }) {
   ].filter(Boolean)
 
   return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-rule-soft px-4 py-3 last:border-0">
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line px-4 py-3 last:border-0">
       <div className="min-w-40 flex-1">
-        <p className="font-display text-sm font-semibold text-bone">{threshold.name}</p>
-        <p className="mt-0.5 text-[13px] text-bone-mute">
+        <p className="text-sm font-semibold text-paper">{threshold.name}</p>
+        <p className="mt-0.5 text-[13px] text-paper-3">
           {channels.length ? `Notifies by ${channels.join(' and ').toLowerCase()}` : 'No delivery channel selected'}
         </p>
       </div>
 
       <div>
-        <p className="label">At or above</p>
+        <p className="eyebrow">At or above</p>
         <div className="mt-1">
           <SeverityRail level={threshold.min_severity} />
         </div>
       </div>
 
       <div>
-        <p className="label">Anomaly above</p>
-        <p className="readout mt-1 text-sm text-bone">
+        <p className="eyebrow">Anomaly above</p>
+        <p className="readout mt-1 text-sm text-paper">
           {threshold.anomaly_score_threshold}
         </p>
       </div>
@@ -201,8 +201,8 @@ function ThresholdRow({ threshold, onUpdate, onDelete, canEdit }) {
           className="tag"
           style={{
             color: threshold.is_active
-              ? 'var(--color-sev-low)'
-              : 'var(--color-bone-mute)',
+              ? 'var(--color-s1)'
+              : 'var(--color-paper-3)',
           }}
         >
           {threshold.is_active ? 'Active' : 'Paused'}
@@ -212,7 +212,7 @@ function ThresholdRow({ threshold, onUpdate, onDelete, canEdit }) {
             <button
               type="button"
               onClick={startEditing}
-              className="font-display text-[13px] font-medium text-bone-dim transition-colors hover:text-signal"
+              className="text-[13px] font-medium text-paper-2 transition-colors hover:text-paper"
             >
               Edit
             </button>
@@ -220,7 +220,7 @@ function ThresholdRow({ threshold, onUpdate, onDelete, canEdit }) {
               type="button"
               onClick={() => onDelete(threshold.id)}
               aria-label={`Delete ${threshold.name}`}
-              className="text-bone-mute transition-colors hover:text-sev-critical"
+              className="text-paper-3 transition-colors hover:text-s4"
             >
               <Trash2 className="h-4 w-4" strokeWidth={1.75} />
             </button>
@@ -312,8 +312,8 @@ export default function Settings() {
       {error && <ErrorBanner message={error} onRetry={fetchData} />}
 
       {!isAdmin && (
-        <div className="rounded-[3px] border border-rule-soft bg-panel px-4 py-3">
-          <p className="text-[13px] text-bone-dim">
+        <div className="rounded-[3px] border border-line bg-ink-1 px-4 py-3">
+          <p className="text-[13px] text-paper-2">
             You have read-only access. Changing the emulation mode or alert
             thresholds needs an administrator account.
           </p>
@@ -348,22 +348,22 @@ export default function Settings() {
                   aria-pressed={selected}
                   className={`rounded-[3px] border p-3.5 text-left transition-colors ${
                     selected
-                      ? 'border-signal bg-raised'
-                      : 'border-rule bg-void hover:border-bone-mute'
+                      ? 'border-paper bg-ink-2'
+                      : 'border-line bg-ink-0 hover:border-bone-mute'
                   } ${!isAdmin ? 'cursor-not-allowed opacity-60' : ''}`}
                 >
                   <span className="flex items-center gap-2">
                     <span
                       className={`h-2.5 w-2.5 shrink-0 rounded-full border-2 ${
-                        selected ? 'border-signal bg-signal' : 'border-bone-mute'
+                        selected ? 'border-paper bg-paper' : 'border-bone-mute'
                       }`}
                       aria-hidden="true"
                     />
-                    <span className="font-display text-sm font-semibold text-bone">
+                    <span className="text-sm font-semibold text-paper">
                       {mode.label}
                     </span>
                   </span>
-                  <span className="mt-1.5 block text-[13px] leading-relaxed text-bone-mute">
+                  <span className="mt-1.5 block text-[13px] leading-relaxed text-paper-3">
                     {mode.desc}
                   </span>
                 </button>
@@ -381,29 +381,29 @@ export default function Settings() {
               {saving ? 'Saving…' : 'Save mode'}
             </button>
             {modeChanged && !saving && (
-              <span className="text-[13px] text-bone-mute">Unsaved change</span>
+              <span className="text-[13px] text-paper-3">Unsaved change</span>
             )}
           </div>
         </div>
 
-        <dl className="grid grid-cols-2 divide-rule-soft border-t border-rule-soft sm:grid-cols-3 sm:divide-x">
+        <dl className="grid grid-cols-2 divide-line border-t border-line sm:grid-cols-3 sm:divide-x">
           <div className="px-4 py-3">
-            <dt className="label">Registered nodes</dt>
-            <dd className="readout mt-1 text-sm text-bone">
+            <dt className="eyebrow">Registered nodes</dt>
+            <dd className="readout mt-1 text-sm text-paper">
               {systemConfig?.active_nodes ?? 0}
             </dd>
           </div>
           <div className="px-4 py-3">
-            <dt className="label">Protocols</dt>
-            <dd className="readout mt-1 text-sm uppercase text-bone">
+            <dt className="eyebrow">Protocols</dt>
+            <dd className="readout mt-1 text-sm uppercase text-paper">
               {systemConfig?.protocols?.length
                 ? systemConfig.protocols.join(' · ')
                 : 'None'}
             </dd>
           </div>
           <div className="px-4 py-3">
-            <dt className="label">Running as</dt>
-            <dd className="readout mt-1 text-sm capitalize text-bone">
+            <dt className="eyebrow">Running as</dt>
+            <dd className="readout mt-1 text-sm capitalize text-paper">
               {systemConfig?.honeypot_mode || 'active'}
             </dd>
           </div>
@@ -427,7 +427,7 @@ export default function Settings() {
         }
       >
         {creating && (
-          <div className="border-b border-rule-soft bg-void/40 p-4">
+          <div className="border-b border-line bg-ink-0/40 p-4">
             <ThresholdForm
               value={newThreshold}
               onChange={setNewThreshold}
@@ -466,23 +466,23 @@ export default function Settings() {
         title="Integration"
         description="Where to point a SIEM or threat intelligence platform."
       >
-        <dl className="divide-y divide-rule-soft">
+        <dl className="divide-y divide-line">
           <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 py-2.5">
-            <dt className="label">API endpoint</dt>
-            <dd className="readout text-[13px] break-all text-bone">
+            <dt className="eyebrow">API endpoint</dt>
+            <dd className="readout text-[13px] break-all text-paper">
               {import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}
             </dd>
           </div>
           <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 py-2.5">
-            <dt className="label">Export formats</dt>
+            <dt className="eyebrow">Export formats</dt>
             {/* JSON, CEF and STIX 2.1 are what the export route actually
                 serves. This previously advertised TAXII, which is not
                 implemented anywhere in the backend. */}
-            <dd className="readout text-[13px] text-bone">JSON · CEF · STIX 2.1</dd>
+            <dd className="readout text-[13px] text-paper">JSON · CEF · STIX 2.1</dd>
           </div>
           <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 py-2.5">
-            <dt className="label">Alert delivery</dt>
-            <dd className="readout text-[13px] text-bone">Email · Signed webhook</dd>
+            <dt className="eyebrow">Alert delivery</dt>
+            <dd className="readout text-[13px] text-paper">Email · Signed webhook</dd>
           </div>
         </dl>
       </Panel>

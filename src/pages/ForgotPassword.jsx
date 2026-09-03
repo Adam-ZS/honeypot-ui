@@ -99,7 +99,7 @@ export default function ForgotPassword() {
         subtitle={
           <>
             If an account exists for{' '}
-            <span className="readout text-bone">{email}</span>, we sent it a
+            <span className="readout text-paper">{email}</span>, we sent it a
             six-digit code.
           </>
         }
@@ -107,7 +107,7 @@ export default function ForgotPassword() {
         <button
           type="button"
           onClick={() => setStep('request')}
-          className="mb-5 flex items-center gap-1.5 font-display text-[13px] font-medium text-bone-mute transition-colors hover:text-bone"
+          className="mb-5 flex items-center gap-1.5 text-[13px] font-medium text-paper-3 transition-colors hover:text-paper"
         >
           <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
           Use a different email
@@ -159,7 +159,7 @@ export default function ForgotPassword() {
       title="Reset your password"
       subtitle="We'll email you a code to set a new one."
       footer={
-        <Link to="/login" className="text-bone-mute hover:text-signal">
+        <Link to="/login" className="text-paper-3 hover:text-paper">
           Back to sign in
         </Link>
       }

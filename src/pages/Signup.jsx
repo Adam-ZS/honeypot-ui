@@ -134,11 +134,11 @@ export default function Signup() {
         subtitle={
           <>
             We sent a six-digit code to{' '}
-            <span className="readout text-bone">{form.email}</span>.
+            <span className="readout text-paper">{form.email}</span>.
           </>
         }
         footer={
-          <span className="text-bone-mute">
+          <span className="text-paper-3">
             Didn&apos;t get it?{' '}
             {resendCooldown > 0 ? (
               <span>You can ask again in {resendCooldown}s.</span>
@@ -147,7 +147,7 @@ export default function Signup() {
                 type="button"
                 onClick={handleResend}
                 disabled={loading}
-                className="font-medium text-bone-dim hover:text-signal disabled:opacity-50"
+                className="font-medium text-paper-2 hover:text-paper disabled:opacity-50"
               >
                 Send a new code
               </button>
@@ -158,7 +158,7 @@ export default function Signup() {
         <button
           type="button"
           onClick={() => setStep('register')}
-          className="mb-5 flex items-center gap-1.5 font-display text-[13px] font-medium text-bone-mute transition-colors hover:text-bone"
+          className="mb-5 flex items-center gap-1.5 text-[13px] font-medium text-paper-3 transition-colors hover:text-paper"
         >
           <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
           Back to details
@@ -199,9 +199,9 @@ export default function Signup() {
       title="Request access"
       subtitle="We'll email you a code to confirm the address before the account goes live."
       footer={
-        <span className="text-bone-mute">
+        <span className="text-paper-3">
           Already have an account?{' '}
-          <Link to="/login" className="font-medium text-bone-dim hover:text-signal">
+          <Link to="/login" className="font-medium text-paper-2 hover:text-paper">
             Sign in
           </Link>
         </span>

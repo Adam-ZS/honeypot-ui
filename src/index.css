@@ -3,66 +3,68 @@
 /*
  * HoneySentinel console.
  *
- * The visual language is field instrumentation — annunciator panels,
- * seismographs, equipment that watches continuously and registers what it
- * sees. Warm graphite rather than blue-black, one amber signal colour, and a
- * calibrated four-step severity scale that reads by position as well as hue.
+ * One rule governs the whole palette: colour means threat, and nothing else.
+ * The interface is achromatic — ink and ivory — and the only saturated hues
+ * anywhere are the four steps of the severity ramp. There is no brand accent
+ * competing with the data, so the screen changes temperature only when the
+ * situation does.
  *
- * Two rules keep it coherent:
- *   1. Mono is for data. IPs, UUIDs, ports, technique IDs, numeric readouts.
- *      Never for labels or headings.
- *   2. Amber is spent once per view, on the live or active thing.
+ * Category and severity share that single ramp because both answer the same
+ * question: how bad. Benign sits at the cool end, exfiltration at the hot.
+ *
+ * Mono is for data. Addresses, ports, UUIDs, technique IDs, readouts. Never
+ * for labels, headings or controls.
  */
 
 @theme {
   /* Type ------------------------------------------------------------- */
-  /* Barlow Semi Condensed is a signage grotesque: condensed is what fits
-     on equipment labelling, and it gives headings authority without caps. */
-  --font-display: 'Barlow Semi Condensed', 'Arial Narrow', sans-serif;
-  --font-sans: 'Barlow', system-ui, -apple-system, sans-serif;
+  --font-display: 'Bricolage Grotesque', 'Archivo', system-ui, sans-serif;
+  --font-sans: 'Archivo', system-ui, -apple-system, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
 
-  /* Ground ----------------------------------------------------------- */
-  --color-void: #15140f;
-  --color-panel: #1d1b15;
-  --color-raised: #2a2721;
-  --color-rule: #3b372e;
-  --color-rule-soft: #2e2b24;
+  /* Ink — cool near-black, stepped for real depth ---------------------- */
+  --color-ink-0: #0a0a0c;
+  --color-ink-1: #101014;
+  --color-ink-2: #17171d;
+  --color-ink-3: #1f1f27;
+  --color-line: #2a2a34;
+  --color-line-2: #3a3a46;
 
-  /* Ink -------------------------------------------------------------- */
-  --color-bone: #e9e5d9;
-  --color-bone-dim: #a49e8c;
-  --color-bone-mute: #6f6a5c;
+  /* Paper — warm ivory against the cool ink, the one deliberate tension */
+  --color-paper: #f2f0ea;
+  --color-paper-2: #9b9aa3;
+  --color-paper-3: #63626c;
 
-  /* The one accent. Amber, as ink rather than light: no glow, no gradient. */
-  --color-signal: #e9a63c;
-  --color-signal-deep: #8a5f18;
-
-  /* Calibrated severity scale, low to critical. */
-  --color-sev-low: #5f8c6a;
-  --color-sev-medium: #c9a227;
-  --color-sev-high: #d2762e;
-  --color-sev-critical: #c4453c;
-
-  /* Attack categories. Distinct from severity: category is a kind, not a
-     magnitude, so these read as labels rather than a scale. */
-  --color-cat-benign: #5f8c6a;
-  --color-cat-recon: #7f9bb5;
-  --color-cat-exploit: #d2762e;
-  --color-cat-exfil: #c4453c;
+  /*
+   * The severity ramp — the only saturated colour in the interface.
+   *
+   * This is a *status* palette (four ordered states), not a categorical one,
+   * so it is held to status rules: >= 3:1 against the surface, and never
+   * carrying meaning alone. Every use pairs it with a text label, and the
+   * severity rail encodes magnitude by tick position as well as hue.
+   *
+   * Stepped from the validated status hues rather than picked by eye. An
+   * earlier hand-chosen ramp put high and critical only 6.2 ΔE apart under
+   * deuteranopia — effectively the same colour for a red-green colourblind
+   * analyst, on the one distinction that matters most. These clear 11.3.
+   */
+  --color-s1: #19b287;
+  --color-s2: #fab219;
+  --color-s3: #ec835a;
+  --color-s4: #d5405f;
 }
 
 @layer base {
   html {
-    background-color: var(--color-void);
+    background-color: var(--color-ink-0);
     color-scheme: dark;
   }
 
   body {
-    background-color: var(--color-void);
-    color: var(--color-bone);
+    background-color: var(--color-ink-0);
+    color: var(--color-paper);
     font-family: var(--font-sans);
-    font-size: 15px;
+    font-size: 14px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -71,179 +73,182 @@
   h1, h2, h3, h4 {
     font-family: var(--font-display);
     font-weight: 600;
-    letter-spacing: 0.005em;
+    letter-spacing: -0.015em;
     text-wrap: balance;
   }
 
-  /* Digits in tables and readouts must line up column to column. */
-  th, td, .tabular {
-    font-variant-numeric: tabular-nums;
-  }
+  th, td, .tabular { font-variant-numeric: tabular-nums; }
 
-  /* One visible focus treatment everywhere, in the accent, so keyboard
-     users always know where they are. */
   :focus-visible {
-    outline: 2px solid var(--color-signal);
+    outline: 2px solid var(--color-paper);
     outline-offset: 2px;
     border-radius: 1px;
   }
 
   ::selection {
-    background: var(--color-signal);
-    color: var(--color-void);
+    background: var(--color-paper);
+    color: var(--color-ink-0);
   }
 
   ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-track { background: var(--color-void); }
+  ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-rule);
-    border: 3px solid var(--color-void);
+    background: var(--color-line);
+    border: 3px solid var(--color-ink-0);
     border-radius: 6px;
   }
-  ::-webkit-scrollbar-thumb:hover { background: var(--color-bone-mute); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-line-2); }
 
-  /* Native controls inherit the panel treatment rather than the OS default. */
-  select option {
-    background: var(--color-panel);
-    color: var(--color-bone);
-  }
+  select option { background: var(--color-ink-2); color: var(--color-paper); }
 }
 
 @layer components {
   /*
-   * Panel — the one container primitive. Nearly square corners: instruments
-   * are machined, not rounded off. Radius is reserved for things that are
-   * genuinely pills, so it stays meaningful.
+   * Panel. Machined corners, not rounded off. Radius is reserved for pills so
+   * it keeps meaning something.
    */
   .panel {
-    background: var(--color-panel);
-    border: 1px solid var(--color-rule-soft);
-    border-radius: 3px;
+    background: var(--color-ink-1);
+    border: 1px solid var(--color-line);
+    border-radius: 4px;
   }
 
-  /* A panel's title bar. Sits flush, separated by a rule rather than padding. */
   .panel-head {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 1rem;
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid var(--color-rule-soft);
+    padding: 0.875rem 1rem;
   }
 
   /*
-   * Field label. Sentence case in the condensed face — not the tracked-out
-   * uppercase mono this console used to put on every label, which flattened
-   * the hierarchy and made data and chrome look alike.
+   * Section title. Small, wide-tracked and quiet — these name a region rather
+   * than announce it, so the data inside stays the loudest thing on screen.
    */
-  .label {
-    font-family: var(--font-display);
-    font-size: 0.8125rem;
-    font-weight: 500;
-    line-height: 1.25;
-    color: var(--color-bone-dim);
+  .eyebrow {
+    font-family: var(--font-sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--color-paper-3);
   }
 
-  /* Numeric readout. Mono earns its place here: these are values. */
+  .label {
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.3;
+    color: var(--color-paper-2);
+  }
+
   .readout {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.03em;
   }
 
-  /* Interactive control shared by buttons, selects and inputs. */
-  .control {
-    background: var(--color-raised);
-    border: 1px solid var(--color-rule);
-    border-radius: 2px;
-    color: var(--color-bone);
+  /* A headline figure. Display face, tight, optically large. */
+  .figure {
     font-family: var(--font-display);
-    font-size: 0.875rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.045em;
+    line-height: 0.88;
+  }
+
+  .control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    background: var(--color-ink-2);
+    border: 1px solid var(--color-line);
+    border-radius: 3px;
+    color: var(--color-paper);
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
     font-weight: 500;
-    padding: 0.4375rem 0.75rem;
+    padding: 0.375rem 0.6875rem;
     transition: border-color 120ms ease, background-color 120ms ease;
   }
 
   .control:hover:not(:disabled) {
-    border-color: var(--color-bone-mute);
+    background: var(--color-ink-3);
+    border-color: var(--color-line-2);
   }
 
-  .control:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
+  .control:disabled { opacity: 0.4; cursor: not-allowed; }
 
+  /* The primary action is ivory-on-ink: the interface has no accent hue to
+     spend, so emphasis comes from inversion instead. */
   .control-primary {
-    background: var(--color-signal);
-    border-color: var(--color-signal);
-    color: var(--color-void);
+    background: var(--color-paper);
+    border-color: var(--color-paper);
+    color: var(--color-ink-0);
     font-weight: 600;
   }
 
   .control-primary:hover:not(:disabled) {
-    background: #f2b558;
-    border-color: #f2b558;
+    background: #ffffff;
+    border-color: #ffffff;
   }
 
-  /* A disabled primary drops out of the accent entirely rather than fading
-     it: translucent amber over the panel reads as a muddy olive, which looks
-     like a rendering fault instead of an unavailable action. */
   .control-primary:disabled {
-    background: var(--color-raised);
-    border-color: var(--color-rule);
-    color: var(--color-bone-mute);
+    background: var(--color-ink-2);
+    border-color: var(--color-line);
+    color: var(--color-paper-3);
     opacity: 1;
   }
 
-  /* Text input. Mono because what gets typed here is data — an IP, a UUID. */
   .field {
-    background: var(--color-void);
-    border: 1px solid var(--color-rule);
-    border-radius: 2px;
-    color: var(--color-bone);
+    background: var(--color-ink-0);
+    border: 1px solid var(--color-line);
+    border-radius: 3px;
+    color: var(--color-paper);
     font-family: var(--font-mono);
-    font-size: 0.875rem;
-    padding: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+    padding: 0.4375rem 0.6875rem;
     width: 100%;
     transition: border-color 120ms ease;
   }
 
-  .field::placeholder { color: var(--color-bone-mute); }
-  .field:focus { border-color: var(--color-signal); }
-  .field-invalid { border-color: var(--color-sev-critical); }
+  .field::placeholder { color: var(--color-paper-3); }
+  .field:focus { border-color: var(--color-paper-2); }
+  .field-invalid { border-color: var(--color-s4); }
 
-  /*
-   * Tag — a genuine pill, so it gets the full radius the panels do not.
-   * Used only where the value is one of a small closed set.
-   */
+  /* A genuine pill, so it gets the radius panels do not. */
   .tag {
     display: inline-flex;
     align-items: center;
     gap: 0.3125rem;
     border-radius: 999px;
     border: 1px solid currentColor;
-    font-family: var(--font-display);
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-family: var(--font-sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
     line-height: 1;
     padding: 0.1875rem 0.5rem;
     white-space: nowrap;
   }
+
+  /* Row in a ranked list: label, drawn bar, value. */
+  .rank-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.4375rem 0;
+  }
 }
 
 @layer utilities {
-  /*
-   * The live indicator is the only non-user-triggered motion in the console,
-   * because it is the only thing that reflects something actually happening.
-   * Everything else changes when a person acts on it.
-   */
-  .pulse-live {
-    animation: pulse-live 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-  }
+  /* The only ambient motion in the console: it marks something genuinely
+     live. Everything else moves in response to a person. */
+  .pulse-live { animation: pulse-live 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
   @keyframes pulse-live {
     0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
+    50% { opacity: 0.3; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -255,36 +260,36 @@
     }
   }
 
-  /* Leaflet ships its own light chrome; bring it onto the panel palette. */
-  .leaflet-container { background: var(--color-void) !important; }
+  /* Leaflet ships light chrome; bring it onto the console's palette. */
+  .leaflet-container { background: var(--color-ink-0) !important; }
 
   .leaflet-popup-content-wrapper,
   .leaflet-popup-tip,
   .leaflet-tooltip {
-    background: var(--color-raised) !important;
-    color: var(--color-bone) !important;
-    border: 1px solid var(--color-rule) !important;
-    border-radius: 3px !important;
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.5) !important;
+    background: var(--color-ink-2) !important;
+    color: var(--color-paper) !important;
+    border: 1px solid var(--color-line-2) !important;
+    border-radius: 4px !important;
+    box-shadow: 0 8px 32px rgb(0 0 0 / 0.6) !important;
   }
 
-  .leaflet-tooltip::before { border-top-color: var(--color-rule) !important; }
-  .leaflet-popup-close-button { color: var(--color-bone-dim) !important; }
+  .leaflet-tooltip::before { border-top-color: var(--color-line-2) !important; }
+  .leaflet-popup-close-button { color: var(--color-paper-2) !important; }
 
   .leaflet-control-attribution {
-    background: rgb(21 20 15 / 0.85) !important;
-    color: var(--color-bone-mute) !important;
+    background: rgb(10 10 12 / 0.85) !important;
+    color: var(--color-paper-3) !important;
     font-family: var(--font-sans) !important;
     font-size: 10px !important;
   }
 
-  .leaflet-control-attribution a { color: var(--color-bone-dim) !important; }
+  .leaflet-control-attribution a { color: var(--color-paper-2) !important; }
 
   .leaflet-control-zoom a {
-    background: var(--color-raised) !important;
-    color: var(--color-bone) !important;
-    border-color: var(--color-rule) !important;
+    background: var(--color-ink-2) !important;
+    color: var(--color-paper) !important;
+    border-color: var(--color-line) !important;
   }
 
-  .leaflet-control-zoom a:hover { background: var(--color-rule) !important; }
+  .leaflet-control-zoom a:hover { background: var(--color-ink-3) !important; }
 }
