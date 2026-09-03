@@ -1,173 +1,232 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Activity, AlertTriangle, Bell, Globe, Mail, Plus, RotateCcw, Save, Settings as SettingsIcon, Trash2, Webhook } from 'lucide-react'
+import { Mail, Plus, Trash2, Webhook } from 'lucide-react'
 import { api } from '../services/api'
 import { useAuth } from '../context/useAuth'
 import ErrorBanner from '../components/ErrorBanner'
 import EmptyState from '../components/EmptyState'
+import { LoadingRegion } from '../components/Loading'
+import { SeverityRail } from '../components/Severity'
+import { SEVERITY_ORDER } from '../lib/severity'
 
-const SEVERITY_OPTIONS = [
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'critical', label: 'Critical' },
-]
+const BLANK_THRESHOLD = {
+  name: '',
+  min_severity: 'medium',
+  anomaly_score_threshold: 0.7,
+  email_enabled: true,
+  webhook_enabled: false,
+}
 
-function ThresholdCard({ threshold, onUpdate, onDelete, canEdit }) {
+function Panel({ title, description, action, children }) {
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <div>
+          <h2 className="text-base font-semibold text-bone">{title}</h2>
+          {description && (
+            <p className="mt-0.5 max-w-xl text-[13px] text-bone-mute">{description}</p>
+          )}
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
+  )
+}
+
+/** Checkbox with its label, used for the two delivery channels. */
+function Toggle({ checked, onChange, disabled, icon: Icon, children }) {
+  return (
+    <label
+      className={`flex items-center gap-2 ${disabled ? 'opacity-50' : 'cursor-pointer'}`}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3.5 w-3.5 accent-signal"
+      />
+      <span className="flex items-center gap-1.5 font-display text-[13px] font-medium text-bone-dim">
+        <Icon className="h-3.5 w-3.5" strokeWidth={1.75} />
+        {children}
+      </span>
+    </label>
+  )
+}
+
+/** Shared editor for both creating and editing a threshold. */
+function ThresholdForm({ value, onChange, onSubmit, onCancel, submitLabel }) {
+  return (
+    <div className="space-y-3">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <label className="flex flex-col gap-1">
+          <span className="label">Name</span>
+          <input
+            type="text"
+            value={value.name}
+            placeholder="Critical only"
+            onChange={(e) => onChange({ ...value, name: e.target.value })}
+            className="field"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="label">Alert at or above</span>
+          <select
+            value={value.min_severity}
+            onChange={(e) => onChange({ ...value, min_severity: e.target.value })}
+            className="control capitalize"
+          >
+            {SEVERITY_ORDER.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="label">Anomaly score above</span>
+          <input
+            type="number"
+            step="0.05"
+            min="0"
+            max="1"
+            value={value.anomaly_score_threshold}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                anomaly_score_threshold: Number.isFinite(parseFloat(e.target.value))
+                  ? parseFloat(e.target.value)
+                  : 0,
+              })
+            }
+            className="field"
+          />
+        </label>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-5">
+        <Toggle
+          checked={value.email_enabled}
+          onChange={(v) => onChange({ ...value, email_enabled: v })}
+          icon={Mail}
+        >
+          Email
+        </Toggle>
+        <Toggle
+          checked={value.webhook_enabled}
+          onChange={(v) => onChange({ ...value, webhook_enabled: v })}
+          icon={Webhook}
+        >
+          Webhook
+        </Toggle>
+      </div>
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={!value.name.trim()}
+          className="control control-primary"
+        >
+          {submitLabel}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="font-display text-[13px] font-medium text-bone-dim transition-colors hover:text-bone"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ThresholdRow({ threshold, onUpdate, onDelete, canEdit }) {
   const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState({
-    name: threshold.name,
-    min_severity: threshold.min_severity,
-    anomaly_score_threshold: threshold.anomaly_score_threshold,
-    email_enabled: threshold.email_enabled,
-    webhook_enabled: threshold.webhook_enabled,
-  })
+  const [form, setForm] = useState(threshold)
 
-  const handleSave = async () => {
+  const startEditing = () => {
+    setForm(threshold)
+    setEditing(true)
+  }
+
+  const save = async () => {
     await onUpdate(threshold.id, form)
     setEditing(false)
   }
 
+  if (editing) {
+    return (
+      <div className="border-b border-rule-soft p-4 last:border-0">
+        <ThresholdForm
+          value={form}
+          onChange={setForm}
+          onSubmit={save}
+          onCancel={() => setEditing(false)}
+          submitLabel="Save changes"
+        />
+      </div>
+    )
+  }
+
+  const channels = [
+    threshold.email_enabled && 'Email',
+    threshold.webhook_enabled && 'Webhook',
+  ].filter(Boolean)
+
   return (
-    <div className="bg-surface-700 border border-border rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <Bell className="w-4 h-4 text-accent-cyan" />
-          <h3 className="font-mono text-sm font-semibold text-white">{threshold.name}</h3>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${threshold.is_active ? 'bg-accent-green/10 text-accent-green border border-accent-green/30' : 'bg-gray-600/20 text-gray-500 border border-gray-600/30'}`}>
-            {threshold.is_active ? 'ACTIVE' : 'DISABLED'}
-          </span>
-          {!editing && canEdit && (
-            <button type="button" onClick={() => setEditing(true)} className="text-xs font-mono text-accent-blue hover:text-blue-300">
-              Edit
-            </button>
-          )}
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-rule-soft px-4 py-3 last:border-0">
+      <div className="min-w-40 flex-1">
+        <p className="font-display text-sm font-semibold text-bone">{threshold.name}</p>
+        <p className="mt-0.5 text-[13px] text-bone-mute">
+          {channels.length ? `Notifies by ${channels.join(' and ').toLowerCase()}` : 'No delivery channel selected'}
+        </p>
+      </div>
+
+      <div>
+        <p className="label">At or above</p>
+        <div className="mt-1">
+          <SeverityRail level={threshold.min_severity} />
         </div>
       </div>
 
-      {editing ? (
-        <div className="space-y-4">
-          <div>
-            <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">Name</label>
-            <input
-              type="text"
-              value={form.name}
-              onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-              className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
-            />
-          </div>
+      <div>
+        <p className="label">Anomaly above</p>
+        <p className="readout mt-1 text-sm text-bone">
+          {threshold.anomaly_score_threshold}
+        </p>
+      </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">Min Severity</label>
-              <select
-                value={form.min_severity}
-                onChange={e => setForm(f => ({ ...f, min_severity: e.target.value }))}
-                className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
-              >
-                {SEVERITY_OPTIONS.map(opt => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">Anomaly Threshold</label>
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                max="1"
-                value={form.anomaly_score_threshold}
-                onChange={e => setForm(f => ({ ...f, anomaly_score_threshold: Number.isFinite(parseFloat(e.target.value)) ? parseFloat(e.target.value) : 0 }))}
-                className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-6">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.email_enabled}
-                onChange={e => setForm(f => ({ ...f, email_enabled: e.target.checked }))}
-                className="w-4 h-4 rounded border-border bg-surface-600 text-accent-blue focus:ring-accent-blue"
-              />
-              <span className="text-xs font-mono text-gray-400 flex items-center gap-1">
-                <Mail className="w-3 h-3" /> Email
-              </span>
-            </label>
-
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.webhook_enabled}
-                onChange={e => setForm(f => ({ ...f, webhook_enabled: e.target.checked }))}
-                className="w-4 h-4 rounded border-border bg-surface-600 text-accent-blue focus:ring-accent-blue"
-              />
-              <span className="text-xs font-mono text-gray-400 flex items-center gap-1">
-                <Webhook className="w-3 h-3" /> Webhook
-              </span>
-            </label>
-          </div>
-
-          <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
+        <span
+          className="tag"
+          style={{
+            color: threshold.is_active
+              ? 'var(--color-sev-low)'
+              : 'var(--color-bone-mute)',
+          }}
+        >
+          {threshold.is_active ? 'Active' : 'Paused'}
+        </span>
+        {canEdit && (
+          <>
             <button
-              onClick={handleSave}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono bg-accent-blue text-surface-900 rounded-lg hover:bg-blue-400 transition-colors"
+              type="button"
+              onClick={startEditing}
+              className="font-display text-[13px] font-medium text-bone-dim transition-colors hover:text-signal"
             >
-              <Save className="w-3.5 h-3.5" /> Save
+              Edit
             </button>
             <button
               type="button"
-              onClick={() => {
-                setForm({
-                  name: threshold.name,
-                  min_severity: threshold.min_severity,
-                  anomaly_score_threshold: threshold.anomaly_score_threshold,
-                  email_enabled: threshold.email_enabled,
-                  webhook_enabled: threshold.webhook_enabled,
-                })
-                setEditing(false)
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono text-gray-400 hover:text-white transition-colors"
+              onClick={() => onDelete(threshold.id)}
+              aria-label={`Delete ${threshold.name}`}
+              className="text-bone-mute transition-colors hover:text-sev-critical"
             >
-              <RotateCcw className="w-3.5 h-3.5" /> Cancel
+              <Trash2 className="h-4 w-4" strokeWidth={1.75} />
             </button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          <div className="flex justify-between text-xs">
-            <span className="font-mono text-gray-500">Min Severity</span>
-            <span className="font-mono text-white capitalize">{threshold.min_severity}</span>
-          </div>
-          <div className="flex justify-between text-xs">
-            <span className="font-mono text-gray-500">Anomaly Score Threshold</span>
-            <span className="font-mono text-white">{threshold.anomaly_score_threshold}</span>
-          </div>
-          <div className="flex justify-between text-xs">
-            <span className="font-mono text-gray-500">Email Alerts</span>
-            <span className={`font-mono ${threshold.email_enabled ? 'text-accent-green' : 'text-gray-600'}`}>
-              {threshold.email_enabled ? 'Enabled' : 'Disabled'}
-            </span>
-          </div>
-          <div className="flex justify-between text-xs">
-            <span className="font-mono text-gray-500">Webhook Alerts</span>
-            <span className={`font-mono ${threshold.webhook_enabled ? 'text-accent-green' : 'text-gray-600'}`}>
-              {threshold.webhook_enabled ? 'Enabled' : 'Disabled'}
-            </span>
-          </div>
-          {canEdit && <button
-            type="button"
-            onClick={() => onDelete(threshold.id)}
-            className="mt-2 flex items-center gap-1.5 text-xs font-mono text-accent-red hover:text-red-400 transition-colors"
-          >
-            <Trash2 className="w-3.5 h-3.5" /> Delete
-          </button>}
-        </div>
-      )}
+          </>
+        )}
+      </div>
     </div>
   )
 }
@@ -181,14 +240,8 @@ export default function Settings() {
   const [honeypotMode, setHoneypotMode] = useState('active')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [showNewThreshold, setShowNewThreshold] = useState(false)
-  const [newThreshold, setNewThreshold] = useState({
-    name: '',
-    min_severity: 'medium',
-    anomaly_score_threshold: 0.7,
-    email_enabled: true,
-    webhook_enabled: false,
-  })
+  const [creating, setCreating] = useState(false)
+  const [newThreshold, setNewThreshold] = useState(BLANK_THRESHOLD)
 
   const fetchData = useCallback(async () => {
     try {
@@ -230,7 +283,7 @@ export default function Settings() {
 
   const handleDeleteThreshold = (id) => {
     // Deleting a threshold silently stops alert delivery, so confirm first.
-    if (!window.confirm('Delete this alert threshold? Notifications matching it will stop.')) {
+    if (!window.confirm('Delete this threshold? Alerts matching it will stop being delivered.')) {
       return Promise.resolve(false)
     }
     return run(() => api.settings.deleteThreshold(id))
@@ -240,8 +293,8 @@ export default function Settings() {
     if (!newThreshold.name.trim()) return
     const ok = await run(() => api.settings.createThreshold(newThreshold))
     if (!ok) return
-    setNewThreshold({ name: '', min_severity: 'medium', anomaly_score_threshold: 0.7, email_enabled: true, webhook_enabled: false })
-    setShowNewThreshold(false)
+    setNewThreshold(BLANK_THRESHOLD)
+    setCreating(false)
   }
 
   const handleUpdateMode = async () => {
@@ -250,206 +303,148 @@ export default function Settings() {
     setSaving(false)
   }
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="flex items-center gap-3">
-          <div className="w-6 h-6 border-2 border-accent-cyan border-t-transparent rounded-full animate-spin" />
-          <span className="font-mono text-sm text-gray-400">Loading settings...</span>
-        </div>
-      </div>
-    )
-  }
+  if (loading) return <LoadingRegion label="Loading settings" className="py-24" />
+
+  const modeChanged = honeypotMode !== (systemConfig?.honeypot_mode || 'active')
 
   return (
-    <div className="space-y-6 animate-fade-in max-w-5xl">
+    <div className="mx-auto max-w-5xl space-y-4">
       {error && <ErrorBanner message={error} onRetry={fetchData} />}
 
       {!isAdmin && (
-        <div className="bg-surface-800 border border-border rounded-xl px-4 py-3">
-          <p className="text-xs font-mono text-gray-400">
+        <div className="rounded-[3px] border border-rule-soft bg-panel px-4 py-3">
+          <p className="text-[13px] text-bone-dim">
             You have read-only access. Changing the emulation mode or alert
-            thresholds requires an administrator account.
+            thresholds needs an administrator account.
           </p>
         </div>
       )}
 
-      <div className="bg-surface-800 border border-border rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-6">
-          <SettingsIcon className="w-5 h-5 text-accent-cyan" />
-          <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
-            Honeypot Configuration
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="block text-xs font-mono text-gray-400 mb-2 uppercase tracking-wider">
-              Global Emulation Mode
-            </label>
-            <div className="flex gap-3">
-              {[
-                { value: 'active', label: 'Active Emulation', desc: 'Full logging & interaction' },
-                { value: 'passive', label: 'Passive Monitoring', desc: 'Lightweight detection' },
-              ].map(mode => (
+      <Panel
+        title="Emulation mode"
+        description="How the honeypot responds to whoever connects to it."
+      >
+        <div className="p-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {[
+              {
+                value: 'active',
+                label: 'Active',
+                desc: 'Answers connections, records the full session and every command.',
+              },
+              {
+                value: 'passive',
+                label: 'Passive',
+                desc: 'Logs connection attempts only. Nothing is answered.',
+              },
+            ].map((mode) => {
+              const selected = honeypotMode === mode.value
+              return (
                 <button
                   key={mode.value}
                   type="button"
                   disabled={!isAdmin}
                   onClick={() => setHoneypotMode(mode.value)}
-                  className={`flex-1 p-4 rounded-xl border transition-all text-left ${
-                    honeypotMode === mode.value
-                      ? 'bg-surface-600 border-accent-blue'
-                      : 'bg-surface-700 border-border hover:border-gray-500'
-                  }`}
+                  aria-pressed={selected}
+                  className={`rounded-[3px] border p-3.5 text-left transition-colors ${
+                    selected
+                      ? 'border-signal bg-raised'
+                      : 'border-rule bg-void hover:border-bone-mute'
+                  } ${!isAdmin ? 'cursor-not-allowed opacity-60' : ''}`}
                 >
-                  <div className="flex items-center gap-2 mb-1">
-                    <Activity className={`w-4 h-4 ${honeypotMode === mode.value ? 'text-accent-blue' : 'text-gray-500'}`} />
-                    <span className="text-sm font-mono font-semibold text-white">{mode.label}</span>
-                  </div>
-                  <p className="text-[10px] font-mono text-gray-500">{mode.desc}</p>
+                  <span className="flex items-center gap-2">
+                    <span
+                      className={`h-2.5 w-2.5 shrink-0 rounded-full border-2 ${
+                        selected ? 'border-signal bg-signal' : 'border-bone-mute'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span className="font-display text-sm font-semibold text-bone">
+                      {mode.label}
+                    </span>
+                  </span>
+                  <span className="mt-1.5 block text-[13px] leading-relaxed text-bone-mute">
+                    {mode.desc}
+                  </span>
                 </button>
-              ))}
-            </div>
+              )
+            })}
+          </div>
+
+          <div className="mt-3 flex items-center gap-3">
             <button
+              type="button"
               onClick={handleUpdateMode}
-              disabled={saving || !isAdmin}
-              className="mt-3 flex items-center gap-1.5 px-4 py-2 text-xs font-mono bg-accent-blue text-surface-900 rounded-lg hover:bg-blue-400 disabled:opacity-50 transition-all"
+              disabled={saving || !isAdmin || !modeChanged}
+              className="control control-primary"
             >
-              <Save className="w-3.5 h-3.5" />
-              {saving ? 'Saving...' : 'Apply Mode'}
+              {saving ? 'Saving…' : 'Save mode'}
             </button>
-          </div>
-
-          <div>
-            <label className="block text-xs font-mono text-gray-400 mb-2 uppercase tracking-wider">
-              Active Nodes
-            </label>
-            <div className="bg-surface-700 border border-border rounded-xl p-4 space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="font-mono text-gray-500">Total Nodes</span>
-                <span className="font-mono text-white">{systemConfig?.active_nodes ?? 0}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="font-mono text-gray-500">Protocols</span>
-                <span className="font-mono text-white">{systemConfig?.protocols?.length ? systemConfig.protocols.join(', ') : 'None registered'}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="font-mono text-gray-500">Current Mode</span>
-                <span className="font-mono text-accent-green capitalize">{honeypotMode}</span>
-              </div>
-            </div>
+            {modeChanged && !saving && (
+              <span className="text-[13px] text-bone-mute">Unsaved change</span>
+            )}
           </div>
         </div>
-      </div>
 
-      <div className="bg-surface-800 border border-border rounded-xl p-6">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5 text-accent-red" />
-            <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
-              Alert Thresholds
-            </h2>
+        <dl className="grid grid-cols-2 divide-rule-soft border-t border-rule-soft sm:grid-cols-3 sm:divide-x">
+          <div className="px-4 py-3">
+            <dt className="label">Registered nodes</dt>
+            <dd className="readout mt-1 text-sm text-bone">
+              {systemConfig?.active_nodes ?? 0}
+            </dd>
           </div>
-          <button
-            type="button"
-            disabled={!isAdmin}
-            onClick={() => setShowNewThreshold(!showNewThreshold)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono bg-surface-600 border border-border rounded-lg text-gray-300 hover:text-white transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            New Threshold
-          </button>
-        </div>
+          <div className="px-4 py-3">
+            <dt className="label">Protocols</dt>
+            <dd className="readout mt-1 text-sm uppercase text-bone">
+              {systemConfig?.protocols?.length
+                ? systemConfig.protocols.join(' · ')
+                : 'None'}
+            </dd>
+          </div>
+          <div className="px-4 py-3">
+            <dt className="label">Running as</dt>
+            <dd className="readout mt-1 text-sm capitalize text-bone">
+              {systemConfig?.honeypot_mode || 'active'}
+            </dd>
+          </div>
+        </dl>
+      </Panel>
 
-        {showNewThreshold && (
-          <div className="bg-surface-700 border border-accent-blue/30 rounded-xl p-5 mb-4 animate-fade-in">
-            <h3 className="text-xs font-mono text-accent-blue mb-3">Create New Threshold</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-              <div>
-                <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">Name</label>
-                <input
-                  type="text"
-                  value={newThreshold.name}
-                  onChange={e => setNewThreshold(f => ({ ...f, name: e.target.value }))}
-                  placeholder="e.g., Critical Only"
-                  className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-gray-600 outline-none focus:border-accent-blue"
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">Min Severity</label>
-                <select
-                  value={newThreshold.min_severity}
-                  onChange={e => setNewThreshold(f => ({ ...f, min_severity: e.target.value }))}
-                  className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
-                >
-                  {SEVERITY_OPTIONS.map(opt => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">Anomaly Threshold</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  max="1"
-                  value={newThreshold.anomaly_score_threshold}
-                  onChange={e => setNewThreshold(f => ({ ...f, anomaly_score_threshold: Number.isFinite(parseFloat(e.target.value)) ? parseFloat(e.target.value) : 0 }))}
-                  className="w-full bg-surface-600 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
-                />
-              </div>
-              <div className="flex items-center gap-6 pt-5">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={newThreshold.email_enabled}
-                    onChange={e => setNewThreshold(f => ({ ...f, email_enabled: e.target.checked }))}
-                    className="w-4 h-4 rounded border-border bg-surface-600 text-accent-blue"
-                  />
-                  <span className="text-xs font-mono text-gray-400 flex items-center gap-1">
-                    <Mail className="w-3 h-3" /> Email
-                  </span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={newThreshold.webhook_enabled}
-                    onChange={e => setNewThreshold(f => ({ ...f, webhook_enabled: e.target.checked }))}
-                    className="w-4 h-4 rounded border-border bg-surface-600 text-accent-blue"
-                  />
-                  <span className="text-xs font-mono text-gray-400 flex items-center gap-1">
-                    <Webhook className="w-3 h-3" /> Webhook
-                  </span>
-                </label>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleCreateThreshold}
-                disabled={!newThreshold.name.trim()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono bg-accent-blue text-surface-900 rounded-lg hover:bg-blue-400 disabled:opacity-50 transition-colors"
-              >
-                <Save className="w-3.5 h-3.5" /> Create
-              </button>
-              <button
-                onClick={() => setShowNewThreshold(false)}
-                className="px-3 py-1.5 text-xs font-mono text-gray-400 hover:text-white transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
+      <Panel
+        title="Alert thresholds"
+        description="Rules that decide which detections are worth notifying someone about."
+        action={
+          isAdmin && (
+            <button
+              type="button"
+              onClick={() => setCreating((open) => !open)}
+              className="control flex shrink-0 items-center gap-1.5"
+            >
+              <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+              New threshold
+            </button>
+          )
+        }
+      >
+        {creating && (
+          <div className="border-b border-rule-soft bg-void/40 p-4">
+            <ThresholdForm
+              value={newThreshold}
+              onChange={setNewThreshold}
+              onSubmit={handleCreateThreshold}
+              onCancel={() => { setCreating(false); setNewThreshold(BLANK_THRESHOLD) }}
+              submitLabel="Create threshold"
+            />
           </div>
         )}
 
         {thresholds.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {thresholds.map(t => (
-              <ThresholdCard
+          <div>
+            {thresholds.map((t) => (
+              <ThresholdRow
                 key={t.id}
-                canEdit={isAdmin}
                 threshold={t}
+                canEdit={isAdmin}
                 onUpdate={handleUpdateThreshold}
                 onDelete={handleDeleteThreshold}
               />
@@ -457,35 +452,40 @@ export default function Settings() {
           </div>
         ) : (
           <EmptyState
-            icon={Bell}
-            title="No alert thresholds configured"
-            hint="Create one to start receiving notifications."
+            title="No thresholds yet"
+            hint={
+              isAdmin
+                ? 'Create one to start receiving alerts about what the honeypot catches.'
+                : 'An administrator can create one to start alert delivery.'
+            }
           />
         )}
-      </div>
+      </Panel>
 
-      <div className="bg-surface-800 border border-border rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-4">
-          <Globe className="w-5 h-5 text-accent-blue" />
-          <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
-            Integration Endpoints
-          </h2>
-        </div>
-        <div className="bg-surface-700 border border-border rounded-lg p-4 font-mono text-xs space-y-2">
-          <div className="flex justify-between">
-            <span className="text-gray-500">API Base URL</span>
-            <span className="text-accent-blue">{import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}</span>
+      <Panel
+        title="Integration"
+        description="Where to point a SIEM or threat intelligence platform."
+      >
+        <dl className="divide-y divide-rule-soft">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 py-2.5">
+            <dt className="label">API endpoint</dt>
+            <dd className="readout text-[13px] break-all text-bone">
+              {import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}
+            </dd>
           </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500">Export Formats</span>
-            <span className="text-white">JSON, CEF, STIX/TAXII</span>
+          <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 py-2.5">
+            <dt className="label">Export formats</dt>
+            {/* JSON, CEF and STIX 2.1 are what the export route actually
+                serves. This previously advertised TAXII, which is not
+                implemented anywhere in the backend. */}
+            <dd className="readout text-[13px] text-bone">JSON · CEF · STIX 2.1</dd>
           </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500">SIEM Formats</span>
-            <span className="text-white">CEF and STIX 2.1 bundles</span>
+          <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 py-2.5">
+            <dt className="label">Alert delivery</dt>
+            <dd className="readout text-[13px] text-bone">Email · Signed webhook</dd>
           </div>
-        </div>
-      </div>
+        </dl>
+      </Panel>
     </div>
   )
 }

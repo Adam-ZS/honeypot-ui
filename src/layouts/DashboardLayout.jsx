@@ -1,30 +1,99 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
-  ShieldAlert, LayoutDashboard, Map, FileText,
-  Settings, Bell, ChevronDown, LogOut, Menu,
-  Activity,
+  LayoutDashboard, Map, FileText, Settings,
+  Bell, ChevronDown, LogOut, Menu, X,
 } from 'lucide-react'
 import { useAuth } from '../context/useAuth'
 import { api } from '../services/api'
 
 const NAV = [
-  { to: '/',          label: 'Dashboard',    icon: LayoutDashboard },
-  { to: '/map',       label: 'Live Map',     icon: Map },
-  { to: '/sessions',  label: 'Session Logs', icon: FileText },
-  { to: '/settings',  label: 'Settings',     icon: Settings },
+  { to: '/', label: 'Overview', icon: LayoutDashboard },
+  { to: '/map', label: 'Origins', icon: Map },
+  { to: '/sessions', label: 'Sessions', icon: FileText },
+  { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
 const STATUS_POLL_MS = 30000
 
+/** The console's mark: a hexagonal cell, drawn rather than pulled from an icon set. */
+function Mark({ className = '' }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" fill="none">
+      <path
+        d="M12 2.6 20.5 7.3v9.4L12 21.4 3.5 16.7V7.3L12 2.6Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 8.2 16 10.4v4.4L12 17l-4-2.2v-4.4L12 8.2Z"
+        fill="currentColor"
+        opacity="0.9"
+      />
+    </svg>
+  )
+}
+
+/**
+ * Persistent engine readout. This is the one fact that is always relevant
+ * regardless of which page an analyst is on — if the engine is down, nothing
+ * else on screen is being updated — so it stays pinned in the rail.
+ */
+function EngineReadout({ engine, nodeCount }) {
+  const state =
+    engine === null ? 'unknown'
+      : !engine.reachable ? 'unreachable'
+        : engine.running ? 'running' : 'stopped'
+
+  const dot = {
+    unknown: 'bg-bone-mute',
+    unreachable: 'bg-sev-critical',
+    stopped: 'bg-sev-high',
+    running: 'bg-sev-low pulse-live',
+  }[state]
+
+  const text = {
+    unknown: 'Checking engine',
+    unreachable: 'Engine unreachable',
+    stopped: 'Engine stopped',
+    running: 'Engine running',
+  }[state]
+
+  return (
+    <div className="border-t border-rule-soft px-4 py-3.5">
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} aria-hidden="true" />
+        <span className="font-display text-[13px] font-medium text-bone">{text}</span>
+      </div>
+
+      <dl className="mt-2.5 space-y-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="font-display text-xs text-bone-mute">Nodes</dt>
+          <dd className="readout text-xs text-bone-dim">
+            {nodeCount === null ? '—' : nodeCount}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="font-display text-xs text-bone-mute">Protocols</dt>
+          <dd className="readout truncate text-xs uppercase text-bone-dim">
+            {engine?.protocols?.length ? engine.protocols.join(' · ') : '—'}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  )
+}
+
 export default function DashboardLayout() {
   const { user, logout } = useAuth()
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [railOpen, setRailOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [engine, setEngine] = useState(null)
   const [nodeCount, setNodeCount] = useState(null)
   const [newAlerts, setNewAlerts] = useState(0)
   const location = useLocation()
+  const profileRef = useRef(null)
 
   useEffect(() => {
     let cancelled = false
@@ -49,155 +118,165 @@ export default function DashboardLayout() {
     }
   }, [])
 
-  const pageTitle = NAV.find(n => n.to === location.pathname)?.label ?? 'Dashboard'
+  // Dismiss the profile menu on Escape, matching the modal's behaviour.
+  useEffect(() => {
+    if (!profileOpen) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') setProfileOpen(false) }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [profileOpen])
+
+  const page = NAV.find((n) => n.to === location.pathname)
 
   return (
-    <div className="flex h-screen bg-surface-900 overflow-hidden">
-      {sidebarOpen && (
+    <div className="flex h-screen overflow-hidden bg-void">
+      {railOpen && (
         <div
-          className="fixed inset-0 bg-black/60 z-20 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-20 bg-void/80 lg:hidden"
+          onClick={() => setRailOpen(false)}
+          role="presentation"
         />
       )}
 
       <aside
-        className={`fixed lg:static inset-y-0 left-0 z-30 w-60 bg-surface-800 border-r border-border flex flex-col transition-transform duration-300 ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+        className={`fixed inset-y-0 left-0 z-30 flex w-56 flex-col border-r border-rule-soft bg-panel transition-transform duration-200 lg:static lg:translate-x-0 ${
+          railOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="flex items-center gap-2.5 px-5 h-16 border-b border-border shrink-0">
-          <ShieldAlert className="text-accent-cyan w-6 h-6 text-glow-cyan" />
-          <span className="font-mono font-semibold text-sm tracking-widest uppercase text-accent-cyan text-glow-cyan">
+        <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-rule-soft px-4">
+          <Mark className="h-[22px] w-[22px] text-signal" />
+          <span className="font-display text-[17px] font-semibold leading-none tracking-tight text-bone">
             HoneySentinel
           </span>
+          <button
+            type="button"
+            onClick={() => setRailOpen(false)}
+            className="ml-auto text-bone-mute hover:text-bone lg:hidden"
+            aria-label="Close menu"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
-        <div className="px-3 py-2 mt-2">
-          <p className="text-[10px] font-mono text-gray-600 uppercase tracking-widest px-2 mb-1">
-            Navigation
-          </p>
-          <nav className="space-y-0.5">
-            {NAV.map(({ to, label, icon: Icon }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={to === '/'}
-                onClick={() => setSidebarOpen(false)}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                    isActive
-                      ? 'bg-surface-600 text-accent-blue border border-border'
-                      : 'text-gray-400 hover:text-white hover:bg-surface-700'
-                  }`
-                }
-              >
-                <Icon className="w-4 h-4 shrink-0" />
-                <span className="font-mono">{label}</span>
-              </NavLink>
-            ))}
-          </nav>
-        </div>
+        <nav className="flex-1 overflow-y-auto p-2">
+          {NAV.map(({ to, label, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              // Closing the rail here rather than in an effect on the path:
+              // it is a response to the tap, so it belongs in the handler and
+              // costs no extra render pass.
+              onClick={() => setRailOpen(false)}
+              className={({ isActive }) =>
+                `relative flex items-center gap-2.5 rounded-[2px] px-2.5 py-2 font-display text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-raised text-bone'
+                    : 'text-bone-dim hover:bg-raised/60 hover:text-bone'
+                }`
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  {/* The active marker is the accent, spent once: a filled
+                      bar against the rail rather than a tinted background. */}
+                  <span
+                    className={`absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r ${
+                      isActive ? 'bg-signal' : 'bg-transparent'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <Icon className="h-4 w-4 shrink-0" strokeWidth={1.75} />
+                  {label}
+                </>
+              )}
+            </NavLink>
+          ))}
+        </nav>
 
-        <div className="mt-auto px-4 py-5 border-t border-border">
-          <div className="flex items-center gap-2 mb-3">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                engine === null
-                  ? 'bg-gray-600'
-                  : engine.reachable && engine.running
-                    ? 'bg-accent-green animate-pulse-slow'
-                    : 'bg-accent-red'
-              }`}
-            />
-            <span className="text-xs font-mono text-gray-400">
-              {engine === null
-                ? 'Checking engine...'
-                : engine.reachable
-                  ? engine.running ? 'Engine running' : 'Engine stopped'
-                  : 'Engine unreachable'}
-            </span>
-          </div>
-          <div className="text-[10px] font-mono text-gray-600 space-y-0.5">
-            <p>
-              {nodeCount === null
-                ? 'Nodes: —'
-                : `${nodeCount} honeypot node${nodeCount === 1 ? '' : 's'} active`}
-            </p>
-            <p>
-              Protocols:{' '}
-              {engine?.protocols?.length ? engine.protocols.join(', ') : 'none'}
-            </p>
-          </div>
-        </div>
+        <EngineReadout engine={engine} nodeCount={nodeCount} />
       </aside>
 
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="h-16 bg-surface-800 border-b border-border flex items-center justify-between px-4 lg:px-6 shrink-0">
-          <div className="flex items-center gap-3">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-rule-soft bg-panel px-4 lg:px-6">
+          <div className="flex min-w-0 items-center gap-3">
             <button
-              onClick={() => setSidebarOpen(true)}
-              className="lg:hidden text-gray-400 hover:text-white transition-colors"
+              type="button"
+              onClick={() => setRailOpen(true)}
+              className="text-bone-dim hover:text-bone lg:hidden"
+              aria-label="Open menu"
             >
-              <Menu className="w-5 h-5" />
+              <Menu className="h-5 w-5" />
             </button>
-            <div className="flex items-center gap-2">
-              <Activity className="w-4 h-4 text-accent-cyan" />
-              <h1 className="font-mono text-sm font-semibold text-white tracking-wider uppercase">
-                {pageTitle}
-              </h1>
-            </div>
+            <h1 className="truncate text-lg font-semibold leading-none text-bone">
+              {page?.label ?? 'Overview'}
+            </h1>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <NavLink
               to="/sessions"
+              className="relative rounded-[2px] p-2 text-bone-dim transition-colors hover:text-bone"
               aria-label={
                 newAlerts > 0
-                  ? `${newAlerts} new alerts. View sessions.`
-                  : 'No new alerts'
+                  ? `${newAlerts} unacknowledged alerts. Go to sessions.`
+                  : 'No unacknowledged alerts'
               }
-              className="relative p-2 text-gray-400 hover:text-white transition-colors"
             >
-              <Bell className="w-5 h-5" />
+              <Bell className="h-[18px] w-[18px]" strokeWidth={1.75} />
               {newAlerts > 0 && (
-                <span className="absolute top-0.5 right-0.5 min-w-[1rem] h-4 px-1 flex items-center justify-center rounded-full bg-accent-red text-[9px] font-mono font-bold text-white">
+                <span className="readout absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-sev-critical px-1 text-[10px] font-semibold text-bone">
                   {newAlerts > 99 ? '99+' : newAlerts}
                 </span>
               )}
             </NavLink>
 
-            <div className="relative">
+            <div className="relative" ref={profileRef}>
               <button
-                onClick={() => setProfileOpen(!profileOpen)}
-                className="flex items-center gap-2 bg-surface-700 hover:bg-surface-600 border border-border rounded-lg px-3 py-1.5 transition-all"
+                type="button"
+                onClick={() => setProfileOpen((open) => !open)}
+                aria-expanded={profileOpen}
+                aria-haspopup="menu"
+                className="flex items-center gap-2 rounded-[2px] border border-rule px-2 py-1.5 transition-colors hover:border-bone-mute"
               >
-                <div className="w-6 h-6 rounded-md bg-gradient-to-br from-accent-blue to-accent-cyan flex items-center justify-center text-xs font-mono font-bold text-surface-900">
+                <span className="readout flex h-5 w-5 shrink-0 items-center justify-center rounded-[2px] bg-signal text-[11px] font-semibold text-void">
                   {user?.email?.[0]?.toUpperCase() || '?'}
-                </div>
-                <span className="hidden sm:block font-mono text-xs text-gray-300 max-w-[120px] truncate">
+                </span>
+                <span className="hidden max-w-[140px] truncate font-display text-[13px] text-bone-dim sm:block">
                   {user?.email || ''}
                 </span>
-                <ChevronDown className="w-3 h-3 text-gray-500" />
+                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-bone-mute" />
               </button>
 
               {profileOpen && (
                 <>
-                  <div className="fixed inset-0 z-40" onClick={() => setProfileOpen(false)} />
-                  <div className="absolute right-0 mt-2 w-52 bg-surface-700 border border-border rounded-xl shadow-xl z-50 animate-fade-in">
-                    <div className="px-4 py-3 border-b border-border">
-                      <p className="text-xs font-mono text-gray-400">Signed in as</p>
-                      <p className="text-sm font-mono text-white truncate">{user?.email}</p>
-                      <span className="inline-block mt-1 text-[10px] font-mono bg-accent-green/10 text-accent-green border border-accent-green/30 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setProfileOpen(false)}
+                    role="presentation"
+                  />
+                  <div
+                    role="menu"
+                    className="panel absolute right-0 z-50 mt-1.5 w-60 shadow-2xl shadow-void/60"
+                  >
+                    <div className="border-b border-rule-soft px-3.5 py-3">
+                      <p className="font-display text-xs text-bone-mute">Signed in as</p>
+                      <p className="readout mt-0.5 truncate text-[13px] text-bone">
+                        {user?.email}
+                      </p>
+                      <span className="tag mt-2 capitalize" style={{ color: 'var(--color-signal)' }}>
                         {user?.role || 'analyst'}
                       </span>
                     </div>
                     <div className="p-1.5">
                       <button
-                        onClick={() => { logout(); setProfileOpen(false); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm font-mono text-accent-red hover:bg-surface-600 rounded-lg transition-colors"
+                        type="button"
+                        role="menuitem"
+                        onClick={() => { logout(); setProfileOpen(false) }}
+                        className="flex w-full items-center gap-2 rounded-[2px] px-2.5 py-2 font-display text-sm font-medium text-bone-dim transition-colors hover:bg-raised hover:text-sev-critical"
                       >
-                        <LogOut className="w-4 h-4" />
-                        Sign Out
+                        <LogOut className="h-4 w-4" strokeWidth={1.75} />
+                        Sign out
                       </button>
                     </div>
                   </div>

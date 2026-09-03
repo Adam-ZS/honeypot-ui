@@ -1,26 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import {
-  ChevronLeft, ChevronRight, Download, Eye, Filter, Search,
-} from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, Search, SlidersHorizontal } from 'lucide-react'
 import { api } from '../services/api'
 import { useAuth } from '../context/useAuth'
 import { useDebounced } from '../hooks/useDebounced'
 import EmptyState from '../components/EmptyState'
 import ErrorBanner from '../components/ErrorBanner'
 import SessionDetailModal from '../components/SessionDetailModal'
+import { LoadingRegion } from '../components/Loading'
+import { CategoryTag } from '../components/Severity'
+import { PROFILE_LABEL_SHORT } from '../lib/severity'
 
 const PAGE_SIZE = 20
 
 const CATEGORIES = ['benign', 'reconnaissance', 'exploitation', 'exfiltration']
 const STATUSES = ['active', 'completed', 'terminated']
-const EXPORT_FORMATS = ['json', 'cef', 'stix']
 
-const CATEGORY_BADGE = {
-  exfiltration: 'bg-accent-red/10 text-accent-red border-accent-red/30',
-  exploitation: 'bg-accent-orange/10 text-accent-orange border-accent-orange/30',
-  reconnaissance: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30',
-  benign: 'bg-accent-green/10 text-accent-green border-accent-green/30',
-}
+const EXPORT_FORMATS = [
+  { id: 'json', label: 'JSON', hint: 'Full session records' },
+  { id: 'cef', label: 'CEF', hint: 'ArcSight and syslog collectors' },
+  { id: 'stix', label: 'STIX 2.1', hint: 'Threat intelligence platforms' },
+]
+
 
 const EMPTY_FILTERS = {
   search: '',
@@ -50,14 +50,17 @@ export default function SessionLogs() {
     [filters, debouncedSearch],
   )
 
+  const activeFilterCount = useMemo(
+    () =>
+      Object.entries(filters).filter(([key, value]) => key !== 'search' && value !== '')
+        .length,
+    [filters],
+  )
+
   const fetchSessions = useCallback(async () => {
     try {
       setLoading(true)
-      const data = await api.sessions.list({
-        page,
-        page_size: PAGE_SIZE,
-        ...query,
-      })
+      const data = await api.sessions.list({ page, page_size: PAGE_SIZE, ...query })
       setSessions(data.sessions || [])
       setTotal(data.total || 0)
       setError(null)
@@ -85,6 +88,11 @@ export default function SessionLogs() {
     setFilters((current) => ({ ...current, [key]: value }))
   }
 
+  const clearFilters = () => {
+    setPage(1)
+    setFilters((current) => ({ ...EMPTY_FILTERS, search: current.search }))
+  }
+
   const handleExport = async (format) => {
     setExporting(format)
     try {
@@ -109,49 +117,55 @@ export default function SessionLogs() {
   }
 
   return (
-    <div className="space-y-4 animate-fade-in">
+    <div className="mx-auto max-w-7xl space-y-4">
       {error && <ErrorBanner message={error} onRetry={fetchSessions} />}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+            <Search
+              className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-bone-mute"
+              strokeWidth={1.75}
+            />
             <input
               type="search"
-              aria-label="Search sessions by IP or UUID"
-              placeholder="Search IP, UUID..."
+              aria-label="Search sessions by address or session ID"
+              placeholder="Address or session ID"
               value={filters.search}
               onChange={(e) => updateFilter('search', e.target.value)}
-              className="bg-surface-700 border border-border rounded-lg pl-9 pr-4 py-2 text-sm font-mono text-white placeholder-gray-600 outline-none focus:border-accent-blue w-64"
+              className="field w-64 pl-8"
             />
           </div>
           <button
             type="button"
             aria-expanded={showFilters}
             onClick={() => setShowFilters((open) => !open)}
-            className={`flex items-center gap-2 px-3 py-2 text-sm font-mono rounded-lg border transition-all ${
-              showFilters
-                ? 'bg-surface-600 border-border text-white'
-                : 'border-border/50 text-gray-400 hover:text-white'
-            }`}
+            className="control flex items-center gap-1.5"
+            style={showFilters ? { borderColor: 'var(--color-signal)' } : undefined}
           >
-            <Filter className="w-4 h-4" />
+            <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={2} />
             Filters
+            {activeFilterCount > 0 && (
+              <span className="readout ml-0.5 rounded-full bg-signal px-1.5 text-[11px] font-semibold text-void">
+                {activeFilterCount}
+              </span>
+            )}
           </button>
         </div>
 
         {canExport && (
           <div className="flex items-center gap-2">
-            {EXPORT_FORMATS.map((format) => (
+            {EXPORT_FORMATS.map(({ id, label, hint }) => (
               <button
-                key={format}
+                key={id}
                 type="button"
                 disabled={exporting !== null}
-                onClick={() => handleExport(format)}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono bg-surface-700 border border-border rounded-lg text-gray-300 hover:text-white hover:bg-surface-600 disabled:opacity-50 transition-all uppercase"
+                onClick={() => handleExport(id)}
+                title={hint}
+                className="control flex items-center gap-1.5"
               >
-                <Download className="w-3.5 h-3.5" />
-                {exporting === format ? 'Exporting...' : format}
+                <Download className="h-3.5 w-3.5" strokeWidth={2} />
+                {exporting === id ? 'Preparing…' : label}
               </button>
             ))}
           </div>
@@ -159,61 +173,81 @@ export default function SessionLogs() {
       </div>
 
       {showFilters && (
-        <div className="bg-surface-800 border border-border rounded-xl p-4 grid grid-cols-2 md:grid-cols-4 gap-3 animate-fade-in">
-          <label className="contents">
+        <div className="panel flex flex-wrap items-end gap-3 p-3">
+          <label className="flex flex-col gap-1">
+            <span className="label">Status</span>
             <select
-              aria-label="Filter by status"
               value={filters.status}
               onChange={(e) => updateFilter('status', e.target.value)}
-              className="bg-surface-700 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue capitalize"
+              className="control capitalize"
             >
-              <option value="">All statuses</option>
+              <option value="">Any</option>
               {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </label>
 
-          <select
-            aria-label="Filter by attack category"
-            value={filters.attack_category}
-            onChange={(e) => updateFilter('attack_category', e.target.value)}
-            className="bg-surface-700 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue capitalize"
-          >
-            <option value="">All categories</option>
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
+          <label className="flex flex-col gap-1">
+            <span className="label">Category</span>
+            <select
+              value={filters.attack_category}
+              onChange={(e) => updateFilter('attack_category', e.target.value)}
+              className="control capitalize"
+            >
+              <option value="">Any</option>
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
 
-          <input
-            type="text"
-            aria-label="Filter by ISO country code"
-            placeholder="Country code (e.g. NL)"
-            maxLength={2}
-            value={filters.country}
-            onChange={(e) => updateFilter('country', e.target.value.toUpperCase())}
-            className="bg-surface-700 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-gray-600 outline-none focus:border-accent-blue"
-          />
+          <label className="flex flex-col gap-1">
+            <span className="label">Country code</span>
+            <input
+              type="text"
+              placeholder="NL"
+              maxLength={2}
+              value={filters.country}
+              onChange={(e) => updateFilter('country', e.target.value.toUpperCase())}
+              className="field w-24"
+            />
+          </label>
 
-          <select
-            aria-label="Filter by anomaly flag"
-            value={filters.is_anomalous}
-            onChange={(e) => updateFilter('is_anomalous', e.target.value)}
-            className="bg-surface-700 border border-border rounded-lg px-3 py-2 text-xs font-mono text-white outline-none focus:border-accent-blue"
-          >
-            <option value="">Anomaly: all</option>
-            <option value="true">Anomalous only</option>
-            <option value="false">Normal only</option>
-          </select>
+          <label className="flex flex-col gap-1">
+            <span className="label">Anomaly</span>
+            <select
+              value={filters.is_anomalous}
+              onChange={(e) => updateFilter('is_anomalous', e.target.value)}
+              className="control"
+            >
+              <option value="">Any</option>
+              <option value="true">Flagged only</option>
+              <option value="false">Not flagged</option>
+            </select>
+          </label>
+
+          {activeFilterCount > 0 && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="ml-auto font-display text-[13px] font-medium text-bone-dim transition-colors hover:text-signal"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
       )}
 
-      <div className="bg-surface-800 border border-border rounded-xl overflow-hidden">
+      <div className="panel overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full text-left">
             <caption className="sr-only">Captured honeypot sessions</caption>
             <thead>
-              <tr className="border-b border-border">
-                {['Time', 'Session', 'Attacker IP', 'Protocol', 'Country', 'Category', 'Profile', 'Anomaly', ''].map((header) => (
-                  <th key={header} scope="col" className="text-left text-[10px] font-mono text-gray-500 uppercase tracking-widest px-4 py-3 whitespace-nowrap">
-                    {header}
+              <tr className="border-b border-rule-soft">
+                {['Started', 'Session', 'Source', 'Protocol', 'Origin', 'Category', 'Profile', 'Anomaly'].map((h) => (
+                  <th
+                    key={h}
+                    scope="col"
+                    className="label whitespace-nowrap px-4 py-2 font-medium"
+                  >
+                    {h}
                   </th>
                 ))}
               </tr>
@@ -221,69 +255,72 @@ export default function SessionLogs() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center">
-                    <div className="flex items-center justify-center gap-3">
-                      <div className="w-5 h-5 border-2 border-accent-cyan border-t-transparent rounded-full animate-spin" />
-                      <span className="font-mono text-sm text-gray-400">Loading sessions...</span>
-                    </div>
+                  <td colSpan={8}>
+                    <LoadingRegion label="Loading sessions" />
                   </td>
                 </tr>
               ) : sessions.length === 0 ? (
                 <tr>
-                  <td colSpan={9}>
+                  <td colSpan={8}>
                     <EmptyState
-                      title="No sessions found"
-                      hint="Adjust the filters, or wait for the honeypot engine to capture traffic."
+                      title="No sessions match"
+                      hint={
+                        activeFilterCount > 0
+                          ? 'Try widening or clearing the filters.'
+                          : 'Sessions appear here as the honeypot engine captures traffic.'
+                      }
                     />
                   </td>
                 </tr>
               ) : (
                 sessions.map((session) => (
-                  <tr key={session.id} className="border-b border-border/50 hover:bg-surface-700 transition-colors">
-                    <td className="px-4 py-2.5 font-mono text-xs text-gray-400 whitespace-nowrap">
+                  <tr
+                    key={session.id}
+                    onClick={() => setSelected(session)}
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setSelected(session)
+                      }
+                    }}
+                    // The whole row opens the session: a 16px eye icon in the
+                    // last column was a needlessly small target for the only
+                    // action the table has.
+                    className="cursor-pointer border-b border-rule-soft/60 transition-colors last:border-0 hover:bg-raised/60"
+                  >
+                    <td className="readout whitespace-nowrap px-4 py-2.5 text-[13px] text-bone-mute">
                       {new Date(session.started_at).toLocaleString()}
                     </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-accent-blue whitespace-nowrap" title={session.session_uuid}>
+                    <td
+                      className="readout whitespace-nowrap px-4 py-2.5 text-[13px] text-bone-dim"
+                      title={session.session_uuid}
+                    >
                       {session.session_uuid.slice(0, 8)}
                     </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-white whitespace-nowrap">
+                    <td className="readout whitespace-nowrap px-4 py-2.5 text-[13px] text-bone">
                       {session.attacker_ip}
                     </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-gray-400 uppercase">
+                    <td className="readout whitespace-nowrap px-4 py-2.5 text-[13px] uppercase text-bone-dim">
                       {session.protocol || '—'}
                     </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-gray-400 whitespace-nowrap">
+                    <td className="readout whitespace-nowrap px-4 py-2.5 text-[13px] text-bone-dim">
                       {session.geo?.country || '—'}
                     </td>
                     <td className="px-4 py-2.5">
-                      {/* Shows the model's actual category. The old severity
-                          column derived a label from the category alone, which
-                          disagreed with the severity the backend computed. */}
-                      <span className={`text-[10px] font-mono border px-2 py-0.5 rounded-full uppercase ${CATEGORY_BADGE[session.attack_category] || 'bg-surface-600 text-gray-300 border-border'}`}>
-                        {session.attack_category || 'unclassified'}
-                      </span>
+                      <CategoryTag category={session.attack_category} />
                     </td>
-                    <td className="px-4 py-2.5 font-mono text-[10px] text-gray-400">
-                      {session.attacker_profile || 'unknown'}
+                    <td className="whitespace-nowrap px-4 py-2.5 text-[13px] text-bone-dim">
+                      {PROFILE_LABEL_SHORT[session.attacker_profile] || PROFILE_LABEL_SHORT.unknown}
                     </td>
                     <td className="px-4 py-2.5">
-                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                        session.is_anomalous
-                          ? 'bg-accent-red/10 text-accent-red border-accent-red/30'
-                          : 'bg-surface-600 text-gray-400 border-border'
-                      }`}>
-                        {session.is_anomalous ? 'YES' : 'NO'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <button
-                        type="button"
-                        onClick={() => setSelected(session)}
-                        aria-label={`View details for session ${session.session_uuid}`}
-                        className="p-1.5 text-gray-500 hover:text-accent-blue transition-colors"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
+                      {session.is_anomalous ? (
+                        <span className="tag" style={{ color: 'var(--color-sev-critical)' }}>
+                          Flagged
+                        </span>
+                      ) : (
+                        <span className="text-[13px] text-bone-mute">—</span>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -293,31 +330,32 @@ export default function SessionLogs() {
         </div>
 
         {total > PAGE_SIZE && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border">
-            <span className="text-xs font-mono text-gray-500">
-              {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}
-            </span>
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between border-t border-rule-soft px-4 py-2.5">
+            <p className="readout text-[13px] text-bone-mute">
+              {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of{' '}
+              {total.toLocaleString()}
+            </p>
+            <div className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
                 aria-label="Previous page"
-                className="p-1.5 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                className="control px-2"
               >
-                <ChevronLeft className="w-4 h-4" />
+                <ChevronLeft className="h-4 w-4" strokeWidth={2} />
               </button>
-              <span className="text-xs font-mono text-gray-400">
-                Page {page} of {totalPages}
+              <span className="readout px-2 text-[13px] text-bone-dim">
+                {page} / {totalPages}
               </span>
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
                 aria-label="Next page"
-                className="p-1.5 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                className="control px-2"
               >
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="h-4 w-4" strokeWidth={2} />
               </button>
             </div>
           </div>

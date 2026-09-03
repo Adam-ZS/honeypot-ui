@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider } from './context/AuthContext'
 import { useAuth } from './context/useAuth'
+import { Spinner } from './components/Loading'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import ForgotPassword from './pages/ForgotPassword'
@@ -15,11 +16,8 @@ function AuthRoutes() {
 
   if (loading) {
     return (
-      <div className="min-h-screen grid-bg flex items-center justify-center">
-        <div className="flex items-center gap-3">
-          <div className="w-6 h-6 border-2 border-accent-cyan border-t-transparent rounded-full animate-spin" />
-          <span className="font-mono text-sm text-gray-400">Loading HoneySentinel...</span>
-        </div>
+      <div className="flex min-h-screen items-center justify-center bg-void">
+        <Spinner label="Starting HoneySentinel" />
       </div>
     )
   }

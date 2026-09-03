@@ -1,27 +1,34 @@
-import { AlertCircle, RefreshCw } from 'lucide-react'
+import { RotateCw } from 'lucide-react'
 
-/** Surfaces a failed request to the user instead of only the console. */
+/**
+ * Surfaces a failed request instead of leaving it in the console. Says what
+ * broke and offers the one action that might fix it — no apology, no
+ * generic "something went wrong".
+ */
 export default function ErrorBanner({ message, onRetry }) {
   return (
     <div
       role="alert"
-      className="flex items-start gap-3 bg-accent-red/10 border border-accent-red/30 rounded-xl px-4 py-3"
+      className="flex items-start gap-3 rounded-[3px] border border-sev-critical/50 bg-sev-critical/10 px-4 py-3"
     >
-      <AlertCircle className="w-4 h-4 text-accent-red mt-0.5 shrink-0" />
-      <div className="flex-1 min-w-0">
-        <p className="text-xs font-mono text-accent-red font-semibold">
-          Could not load data
+      <span
+        className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-sev-critical"
+        aria-hidden="true"
+      />
+      <div className="min-w-0 flex-1">
+        <p className="font-display text-sm font-semibold text-bone">
+          Could not load this data
         </p>
-        <p className="text-xs font-mono text-gray-400 mt-0.5 break-words">{message}</p>
+        <p className="readout mt-0.5 text-[13px] break-words text-bone-dim">{message}</p>
       </div>
       {onRetry && (
         <button
           type="button"
           onClick={onRetry}
-          className="flex items-center gap-1.5 text-xs font-mono text-accent-red hover:underline shrink-0"
+          className="control flex shrink-0 items-center gap-1.5"
         >
-          <RefreshCw className="w-3 h-3" />
-          Retry
+          <RotateCw className="h-3.5 w-3.5" strokeWidth={2} />
+          Try again
         </button>
       )}
     </div>

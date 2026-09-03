@@ -1,12 +1,35 @@
 import { useEffect, useRef } from 'react'
-import { AlertTriangle, Clock, FileBox, Globe, Shield, Terminal, X } from 'lucide-react'
+import { ExternalLink, X } from 'lucide-react'
+import { CategoryTag } from './Severity'
+import { PROFILE_LABEL } from '../lib/severity'
 
 function percent(value) {
   return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '—'
 }
 
-function fixed(value, digits = 4) {
-  return typeof value === 'number' ? value.toFixed(digits) : '—'
+
+/** A labelled value. Mono on the value only — the label is chrome, not data. */
+function Fact({ label, children, mono = true }) {
+  return (
+    <div className="min-w-0">
+      <dt className="label">{label}</dt>
+      <dd className={`mt-0.5 truncate text-sm text-bone ${mono ? 'readout' : ''}`}>
+        {children}
+      </dd>
+    </div>
+  )
+}
+
+function Section({ title, note, children }) {
+  return (
+    <section className="border-t border-rule-soft px-5 py-4">
+      <div className="flex items-baseline justify-between gap-3">
+        <h3 className="font-display text-sm font-semibold text-bone">{title}</h3>
+        {note && <span className="text-xs text-bone-mute">{note}</span>}
+      </div>
+      <div className="mt-3">{children}</div>
+    </section>
+  )
 }
 
 export default function SessionDetailModal({ session, onClose }) {
@@ -24,49 +47,55 @@ export default function SessionDetailModal({ session, onClose }) {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [session, onClose])
 
+  // Restore page scrolling when the dialog owns the viewport.
+  useEffect(() => {
+    if (!session) return undefined
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = previous }
+  }, [session])
+
   if (!session) return null
 
   const techniques = session.mitre_techniques || []
+  const tactics = session.mitre_tactics || []
   const tools = session.detected_tools || []
   const intents = session.detected_intents || []
 
-  const facts = [
-    { label: 'Attacker IP', value: session.attacker_ip, icon: Globe },
-    {
-      label: 'Country',
-      value: session.geo?.country_name || session.geo?.country || 'Unknown',
-      icon: Globe,
-    },
-    {
-      label: 'Duration',
-      value:
-        typeof session.duration_seconds === 'number'
-          ? `${session.duration_seconds.toFixed(1)}s`
-          : 'In progress',
-      icon: Clock,
-    },
-    { label: 'Status', value: session.status, icon: Shield },
-  ]
+  const duration =
+    typeof session.duration_seconds === 'number'
+      ? session.duration_seconds < 60
+        ? `${session.duration_seconds.toFixed(1)}s`
+        : `${Math.floor(session.duration_seconds / 60)}m ${Math.round(session.duration_seconds % 60)}s`
+      : 'In progress'
 
   return (
     <div
-      className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-void/85 p-4 sm:items-center"
       onClick={onClose}
       role="presentation"
     >
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Session details"
-        className="bg-surface-800 border border-border rounded-xl w-full max-w-3xl max-h-[85vh] overflow-y-auto animate-slide-up"
+        aria-label={`Session ${session.session_uuid}`}
+        className="panel my-auto w-full max-w-3xl shadow-2xl shadow-void"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 bg-surface-800 border-b border-border px-6 py-4 flex items-center justify-between z-10">
+        <header className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
-            <h2 className="font-mono text-sm font-semibold text-white uppercase tracking-wider">
-              Session Details
-            </h2>
-            <p className="text-xs font-mono text-gray-500 mt-0.5 truncate">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h2 className="readout text-lg font-semibold text-bone">
+                {session.attacker_ip}
+              </h2>
+              <CategoryTag category={session.attack_category} />
+              {session.is_anomalous && (
+                <span className="tag" style={{ color: 'var(--color-sev-critical)' }}>
+                  Anomalous
+                </span>
+              )}
+            </div>
+            <p className="readout mt-1 truncate text-xs text-bone-mute">
               {session.session_uuid}
             </p>
           </div>
@@ -75,121 +104,127 @@ export default function SessionDetailModal({ session, onClose }) {
             type="button"
             onClick={onClose}
             aria-label="Close session details"
-            className="p-2 text-gray-400 hover:text-white transition-colors"
+            className="shrink-0 rounded-[2px] p-1.5 text-bone-dim transition-colors hover:text-bone"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" strokeWidth={1.75} />
           </button>
-        </div>
+        </header>
 
-        <div className="p-6 space-y-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {facts.map(({ label, value, icon: Icon }) => (
-              <div key={label} className="bg-surface-700 rounded-lg p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <Icon className="w-3.5 h-3.5 text-gray-500" />
-                  <span className="text-[10px] font-mono text-gray-500 uppercase">{label}</span>
-                </div>
-                <p className="text-sm font-mono text-white truncate">{value}</p>
-              </div>
-            ))}
-          </div>
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-rule-soft px-5 py-4 sm:grid-cols-4">
+          <Fact label="Origin" mono={false}>
+            {session.geo?.country_name || session.geo?.country || 'Unknown'}
+          </Fact>
+          <Fact label="Protocol">
+            <span className="uppercase">{session.protocol || '—'}</span>
+          </Fact>
+          <Fact label="Duration">{duration}</Fact>
+          <Fact label="Status" mono={false}>
+            <span className="capitalize">{session.status}</span>
+          </Fact>
+        </dl>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-surface-700 rounded-lg p-4">
-              <h3 className="text-xs font-mono text-gray-400 uppercase mb-3 flex items-center gap-2">
-                <AlertTriangle className="w-3.5 h-3.5 text-accent-red" />
-                Model Classification
-              </h3>
-              <dl className="space-y-2">
-                {[
-                  ['Category', session.attack_category || 'unclassified'],
-                  ['Confidence', percent(session.attack_confidence)],
-                  ['Anomaly score', fixed(session.anomaly_score)],
-                  ['Profile', session.attacker_profile || 'unknown'],
-                ].map(([label, value]) => (
-                  <div key={label} className="flex justify-between">
-                    <dt className="text-xs font-mono text-gray-500">{label}</dt>
-                    <dd className="text-xs font-mono text-white">{value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
+        <Section
+          title="Model verdict"
+          note={session.model_source === 'synthetic' ? 'Bootstrap model' : undefined}
+        >
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+            <Fact label="Category" mono={false}>
+              <span className="capitalize">{session.attack_category || 'Unclassified'}</span>
+            </Fact>
+            <Fact label="Confidence">{percent(session.attack_confidence)}</Fact>
+            <Fact label="Anomaly score">
+              {typeof session.anomaly_score === 'number'
+                ? session.anomaly_score.toFixed(3)
+                : '—'}
+            </Fact>
+            <Fact label="Profile" mono={false}>
+              {PROFILE_LABEL[session.attacker_profile] || PROFILE_LABEL.unknown}
+            </Fact>
+          </dl>
+        </Section>
 
-            <div className="bg-surface-700 rounded-lg p-4">
-              <h3 className="text-xs font-mono text-gray-400 uppercase mb-3 flex items-center gap-2">
-                <Terminal className="w-3.5 h-3.5 text-accent-cyan" />
-                Command Analysis
-              </h3>
-              <div className="space-y-3">
-                <div>
-                  <span className="text-[10px] font-mono text-gray-500 uppercase">Detected tools</span>
-                  <div className="flex flex-wrap gap-1 mt-1">
-                    {tools.length ? (
-                      tools.map((tool) => (
-                        <span key={tool} className="text-[10px] font-mono bg-accent-red/10 text-accent-red border border-accent-red/30 px-1.5 py-0.5 rounded">
-                          {tool}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-xs font-mono text-gray-600">None detected</span>
-                    )}
-                  </div>
-                </div>
-                <div>
-                  <span className="text-[10px] font-mono text-gray-500 uppercase">Intents</span>
-                  <div className="flex flex-wrap gap-1 mt-1">
-                    {intents.length ? (
-                      intents.map((intent) => (
-                        <span key={intent} className="text-[10px] font-mono bg-accent-blue/10 text-accent-blue border border-accent-blue/30 px-1.5 py-0.5 rounded">
-                          {intent}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-xs font-mono text-gray-600">None detected</span>
-                    )}
-                  </div>
-                </div>
+        <Section
+          title="Command analysis"
+          note={`${session.command_count ?? 0} ${session.command_count === 1 ? 'command' : 'commands'}`}
+        >
+          <div className="space-y-3">
+            <div>
+              <p className="label">Tools detected</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {tools.length ? (
+                  tools.map((tool) => (
+                    <span
+                      key={tool}
+                      className="tag"
+                      style={{ color: 'var(--color-sev-high)' }}
+                    >
+                      {tool}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-[13px] text-bone-mute">None</span>
+                )}
               </div>
             </div>
+            <div>
+              <p className="label">Intents</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {intents.length ? (
+                  intents.map((intent) => (
+                    <span
+                      key={intent}
+                      className="tag capitalize"
+                      style={{ color: 'var(--color-cat-recon)' }}
+                    >
+                      {intent.replace(/_/g, ' ')}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-[13px] text-bone-mute">None</span>
+                )}
+              </div>
+            </div>
           </div>
+        </Section>
 
-          {techniques.length > 0 && (
-            <div className="bg-surface-700 rounded-lg p-4">
-              <h3 className="text-xs font-mono text-gray-400 uppercase mb-3">
-                MITRE ATT&amp;CK Techniques
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {techniques.map((technique) => (
+        {(techniques.length > 0 || tactics.length > 0) && (
+          <Section
+            title="MITRE ATT&CK"
+            note={tactics.length ? tactics.map((t) => t.name).join(' · ') : undefined}
+          >
+            <ul className="flex flex-wrap gap-1.5">
+              {techniques.map((technique) => (
+                <li key={technique.id}>
                   <a
-                    key={technique.id}
                     href={`https://attack.mitre.org/techniques/${technique.id.replace('.', '/')}/`}
                     target="_blank"
                     rel="noreferrer noopener"
-                    className="text-xs font-mono bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/30 px-2 py-1 rounded hover:bg-accent-cyan/20 transition-colors"
+                    className="tag transition-colors hover:border-signal"
+                    style={{ color: 'var(--color-bone-dim)' }}
                   >
-                    {technique.id}: {technique.name}
+                    <span className="readout" style={{ color: 'var(--color-signal)' }}>
+                      {technique.id}
+                    </span>
+                    {technique.name}
+                    <ExternalLink className="h-3 w-3 opacity-60" strokeWidth={2} />
                   </a>
-                ))}
-              </div>
-            </div>
-          )}
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
 
-          {session.uploaded_files?.length > 0 && (
-            <div className="bg-surface-700 rounded-lg p-4">
-              <h3 className="text-xs font-mono text-gray-400 uppercase mb-3 flex items-center gap-2">
-                <FileBox className="w-3.5 h-3.5" />
-                Uploaded Files
-              </h3>
-              <ul className="space-y-1">
-                {session.uploaded_files.map((file) => (
-                  <li key={file} className="text-xs font-mono text-gray-300 break-all">
-                    {file}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
+        {session.uploaded_files?.length > 0 && (
+          <Section title="Files uploaded" note={`${session.uploaded_files.length}`}>
+            <ul className="space-y-1">
+              {session.uploaded_files.map((file) => (
+                <li key={file} className="readout text-[13px] break-all text-bone-dim">
+                  {file}
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
       </div>
     </div>
   )
