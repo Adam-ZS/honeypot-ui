@@ -198,6 +198,67 @@ class GeoInfo(BaseModel):
     lon: Optional[float] = None
 
 
+class ClusterAssignment(BaseModel):
+    """Where the unsupervised model placed this session.
+
+    ``fitted`` is false until enough sessions exist to fit at all, and the UI
+    is expected to say so rather than showing cluster 0 for everything.
+    """
+
+    fitted: bool = False
+    cluster: Optional[int] = None
+    distance: Optional[float] = None
+    is_outlier: Optional[bool] = None
+
+
+class TranscriptEntry(BaseModel):
+    command: str
+    output: str = ""
+    exit_code: int = 0
+    timestamp: Optional[float] = None
+
+
+class SessionTranscriptResponse(BaseModel):
+    session_id: int
+    session_uuid: str
+    #: False when the session predates transcript capture or held no commands,
+    #: so the client can distinguish "nothing recorded" from "empty session".
+    available: bool
+    entries: List[TranscriptEntry] = []
+    truncated: bool = False
+
+
+class CapturedCredential(BaseModel):
+    username: str
+    password: str
+    success: bool
+    timestamp: Optional[float] = None
+
+
+class SessionCredentialsResponse(BaseModel):
+    session_id: int
+    available: bool
+    credentials: List[CapturedCredential] = []
+
+
+class NetworkEvent(BaseModel):
+    event_type: str
+    url: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    filename: Optional[str] = None
+    path: Optional[str] = None
+    source_url: Optional[str] = None
+    piped_to_shell: Optional[bool] = None
+    bytes: Optional[int] = None
+    #: Always false — the honeypot records the intent and never performs the
+    #: retrieval or the execution. Surfaced so a reader of the UI is never in
+    #: doubt about whether the payload actually ran.
+    fetched: Optional[bool] = None
+    executed: Optional[bool] = None
+    at: Optional[float] = None
+
+
 class HoneypotSessionResponse(BaseModel):
     id: int
     session_uuid: str
@@ -221,6 +282,19 @@ class HoneypotSessionResponse(BaseModel):
     mitre_tactics: Optional[List[str]]
     mitre_techniques: Optional[List[MitreTechnique]]
     uploaded_files: Optional[List[str]]
+    #: Whether the verdict above came from a model trained on real traffic or
+    #: from the synthetic bootstrap. Presenting a confidence figure without
+    #: this is the difference between a measurement and a decoration.
+    model_source: Optional[str] = None
+    command_summary: Optional[str] = None
+    cluster: Optional[ClusterAssignment] = None
+    keystroke_count: int = 0
+    network_events: List[NetworkEvent] = []
+    #: True when the transcript is stored and can be fetched from
+    #: /sessions/{id}/transcript, so the UI can hide the control rather than
+    #: offer a request that returns nothing.
+    has_transcript: bool = False
+    has_credentials: bool = False
     created_at: datetime
 
     class Config:
@@ -257,6 +331,22 @@ class HoneypotSessionResponse(BaseModel):
             mitre_tactics=obj.mitre_tactics or [],
             mitre_techniques=obj.mitre_techniques or [],
             uploaded_files=obj.uploaded_files or [],
+            model_source=obj.model_source,
+            command_summary=obj.command_summary,
+            cluster=ClusterAssignment(
+                fitted=obj.cluster_id is not None,
+                cluster=obj.cluster_id,
+                distance=obj.cluster_distance,
+                is_outlier=obj.cluster_is_outlier,
+            ),
+            keystroke_count=obj.keystroke_count or 0,
+            network_events=[
+                NetworkEvent(**{k: v for k, v in e.items() if k in NetworkEvent.model_fields})
+                for e in (obj.network_events or [])
+                if isinstance(e, dict) and e.get("event_type")
+            ],
+            has_transcript=bool(obj.transcript_encrypted),
+            has_credentials=bool(obj.credentials_encrypted),
             created_at=obj.created_at,
         )
 

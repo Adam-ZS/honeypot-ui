@@ -31,6 +31,7 @@ import asyncssh
 
 from honeypot.core.config import config
 from honeypot.core.session import session_manager
+from honeypot.core.shell_state import shell_states
 from honeypot.core.modes import mode_handler
 from honeypot.emulators.base import BaseEmulator
 from honeypot.adaptive.fingerprint import fingerprint_engine
@@ -96,6 +97,7 @@ class _HoneypotSSHServer(asyncssh.SSHServer):
         if self.state.session_id:
             # connection_lost is synchronous; hand the close off to the loop.
             asyncio.create_task(session_manager.end_session(self.state.session_id))
+            shell_states.drop(self.state.session_id)
 
     async def begin_auth(self, username: str) -> bool:
         """Open the session here — the first point with a username and a loop.
@@ -173,6 +175,10 @@ class _HoneypotSSHServer(asyncssh.SSHServer):
             if username == "root":
                 state.is_root = True
                 state.cwd = "/root"
+                # Keep the emulator's view of the shell in step with the
+                # session's, or `pwd` and the prompt disagree from the first
+                # command.
+                shell_states.get(state.session_id).cwd = "/root"
             await adaptive_engine.profile_actor(
                 state.session_id,
                 self.source_ip,
@@ -311,21 +317,7 @@ class SSHHoneypot(BaseEmulator):
 
     async def _run_command(self, process, server, state, command: str) -> None:
         command = command[:MAX_COMMAND_LENGTH]
-        await session_manager.record_command(state.session_id, command, "", 0)
-        await adaptive_engine.profile_actor(
-            state.session_id, server.source_ip, {"command": command}
-        )
-        response = await mode_handler.handle_interaction(
-            state.session_id,
-            "ssh",
-            "command",
-            {
-                "command": command,
-                "username": state.username,
-                "cwd": state.cwd,
-                "is_root": state.is_root,
-            },
-        )
+        response = await self._dispatch(server, state, command)
         if response:
             process.stdout.write(response.encode())
         process.exit(0)
@@ -401,20 +393,36 @@ class SSHHoneypot(BaseEmulator):
                         process.stdout.write(char.encode())
 
     async def _run_interactive_command(self, process, server, state, command: str) -> None:
-        await session_manager.record_command(state.session_id, command, "", 0)
+        response = await self._dispatch(server, state, command)
+        if response:
+            process.stdout.write(response.encode())
+
+    async def _dispatch(self, server, state, command: str) -> str:
+        """Run one command and record it with what it actually printed.
+
+        Both call sites used to record the command with a hardcoded empty
+        output before the emulator had produced one, so every stored session
+        held commands with no responses. The transcript an analyst reads is
+        half the evidence: what the attacker typed only means something beside
+        what the machine appeared to tell them.
+        """
         await adaptive_engine.profile_actor(
             state.session_id, server.source_ip, {"command": command}
         )
+        payload = {
+            "command": command,
+            "username": state.username,
+            "cwd": state.cwd,
+            "is_root": state.is_root,
+        }
         response = await mode_handler.handle_interaction(
-            state.session_id,
-            "ssh",
-            "command",
-            {
-                "command": command,
-                "username": state.username,
-                "cwd": state.cwd,
-                "is_root": state.is_root,
-            },
+            state.session_id, "ssh", "command", payload
         )
-        if response:
-            process.stdout.write(response.encode())
+        # The emulator reports a directory change through the payload dict so
+        # the prompt and later commands agree with it.
+        if payload.get("cwd_after"):
+            state.cwd = payload["cwd_after"]
+        await session_manager.record_command(
+            state.session_id, command, response or "", 0
+        )
+        return response

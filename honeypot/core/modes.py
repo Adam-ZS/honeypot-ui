@@ -1,10 +1,13 @@
 import asyncio
+import posixpath
 import random
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
 from honeypot.core.config import OperationalMode, config
+from honeypot.core import dropper
+from honeypot.core.shell_state import DroppedFile, resolve_path, shell_states
 from honeypot.adaptive.fingerprint import fingerprint_engine
 from honeypot.core.session import session_manager
 
@@ -122,7 +125,11 @@ class ModeHandler:
         elif interaction_type == "prompt":
             is_root = data.get("is_root", False)
             hostname = data.get("hostname") or fingerprint_engine.get_fake_hostname()
-            cwd = data.get("cwd", "~")
+            # bash abbreviates the home directory to ~; printing the absolute
+            # path in the prompt is a tell, and the prompt is the first thing
+            # anyone looks at.
+            home = "/root" if is_root else "/home/user"
+            cwd = shell_states.get(session_id).display_cwd(home)
             prompt_char = "#" if is_root else "$"
             return f"{data.get('username', 'user')}@{hostname}:{cwd}{prompt_char} "
 
@@ -171,23 +178,41 @@ class ModeHandler:
             "10.0.0.5\t" + hostname + "\n",
         }
 
+        shell = shell_states.get(session_id)
+
         if cmd == "ls" or cmd.startswith("ls "):
-            path = cmd[3:].strip() if len(cmd) > 3 else "."
-            if path == "-la" or path == "-al":
-                path = "."
-            entries = fake_fs.get(path, ["file1.txt", "file2.log", "config.yml"])
+            args = [a for a in cmd[3:].split() if not a.startswith("-")]
+            path = resolve_path(shell.cwd, args[0]) if args else shell.cwd
+            entries = fake_fs.get(path)
+            if entries is None:
+                entries = (
+                    ["file1.txt", "file2.log", "config.yml"]
+                    if path in ("/home/user", "/home/admin")
+                    else []
+                )
+            # Anything the attacker downloaded into this directory is listed
+            # too, so `wget … && ls` agrees with itself.
+            dropped = {
+                posixpath.basename(fp): f
+                for fp, f in shell.files.items()
+                if posixpath.dirname(fp) == path
+            }
             result = ""
-            for entry in entries:
-                is_dir = entry not in ("file1.txt", "file2.log", "config.yml")
-                perms = "drwxr-xr-x" if is_dir else "-rw-r--r--"
-                size = "4096" if is_dir else str(random.randint(100, 50000))
+            for entry in list(entries) + sorted(dropped):
+                file = dropped.get(entry)
+                if file is not None:
+                    perms = "-rwxr-xr-x" if file.executable else "-rw-r--r--"
+                    size = str(file.size)
+                else:
+                    is_dir = entry not in ("file1.txt", "file2.log", "config.yml")
+                    perms = "drwxr-xr-x" if is_dir else "-rw-r--r--"
+                    size = "4096" if is_dir else str(random.randint(100, 50000))
                 date = datetime.now(timezone.utc).strftime("%b %d %H:%M")
                 result += f"{perms} 1 root root {size:>6} {date} {entry}\n"
             return result
 
         elif cmd == "pwd":
-            result = data.get("cwd", "/home/user") + "\n"
-            return result
+            return shell.cwd + "\n"
 
         elif cmd == "whoami":
             result = data.get("username", "user") + "\n"
@@ -257,12 +282,25 @@ class ModeHandler:
             )
             return result
 
-        elif cmd == "wget" or cmd.startswith("wget ") or cmd == "curl" or cmd.startswith("curl "):
-            result = f"bash: {cmd.split()[0]}: command not found\n"
-            return result
+        elif cmd.split() and cmd.split()[0] in ("wget", "curl"):
+            return await self._emulate_download(session_id, cmd, data)
 
-        elif cmd.startswith("cd "):
-            return ""
+        elif cmd == "cd" or cmd.startswith("cd "):
+            shell = shell_states.get(session_id)
+            target = resolve_path(shell.cwd, cmd[2:].strip())
+            # Directories the fake tree knows about, plus anything the
+            # attacker has been allowed to create. A dropper that cds into
+            # /tmp and is told it does not exist stops there.
+            known = set(fake_fs) | {
+                "/home/user", "/home/admin", "/root", "/var", "/var/tmp",
+                "/usr", "/usr/bin", "/usr/local", "/dev", "/dev/shm",
+                "/proc", "/sys", "/mnt", "/run",
+            }
+            if target in known or target.startswith("/tmp"):
+                shell.cwd = target
+                data["cwd_after"] = target
+                return ""
+            return f"bash: cd: {cmd[2:].strip()}: No such file or directory\n"
 
         elif cmd == "exit" or cmd == "logout":
             return ""
@@ -300,8 +338,18 @@ class ModeHandler:
             return result
 
         elif cmd.startswith("chmod") or cmd.startswith("chown"):
-            result = ""
-            return result
+            # `chmod +x payload` is the step between fetching and running.
+            # Recording it means the transcript shows intent to execute even
+            # when the session is cut before the payload runs.
+            if cmd.startswith("chmod"):
+                for arg in cmd.split()[1:]:
+                    if arg.startswith(("-", "+", "0", "7", "u", "a", "g", "o")):
+                        continue
+                    path = resolve_path(shell.cwd, arg)
+                    file = shell.files.get(path)
+                    if file is not None:
+                        file.executable = True
+            return ""
 
         elif cmd.startswith("rm ") or cmd.startswith("mkdir ") or cmd.startswith("touch "):
             result = ""
@@ -322,9 +370,94 @@ class ModeHandler:
             )
             return result
 
+        elif cmd.startswith("./") or cmd.split()[0] in ("sh", "bash", "source", "."):
+            # Running something the attacker put there. A dropper checks this:
+            # if the loader it just fetched cannot be executed, it moves on to
+            # another host and the rest of the chain is never observed.
+            parts = cmd.split()
+            arg = parts[0] if cmd.startswith("./") else (parts[1] if len(parts) > 1 else "")
+            if not arg:
+                return ""
+            path = resolve_path(shell.cwd, arg)
+            file = shell.files.get(path)
+            if file is None:
+                return f"bash: {arg}: No such file or directory\n"
+            if cmd.startswith("./") and not file.executable:
+                return f"bash: {arg}: Permission denied\n"
+            await session_manager.record_network_event(
+                session_id,
+                "payload_execution",
+                {
+                    "path": path,
+                    "source_url": file.source_url,
+                    "bytes": file.size,
+                    "executed": False,
+                },
+            )
+            # A real loader daemonises and prints nothing. Silence is both the
+            # accurate answer and the one that keeps the session going.
+            return ""
+
         else:
             result = f"bash: {cmd.split()[0] if cmd else 'command'}: command not found\n"
             return result
+
+    async def _emulate_download(self, session_id: str, cmd: str, data: dict) -> str:
+        """Answer wget/curl as though the fetch worked.
+
+        No request is made. The URL is parsed, recorded against the session as
+        a network event so it reaches the backend as an indicator, and a
+        plausible transcript is returned. Letting the fetch "succeed" is the
+        whole point: the attacker's next commands — chmod, execute, the second
+        stage, the kill-competitor loop — only happen if this one does.
+        """
+        download = dropper.parse(cmd)
+        if download is None:
+            # A bare `wget` or a form we cannot read: reply the way the real
+            # tool does for a missing argument rather than inventing output.
+            tool = cmd.split()[0]
+            if tool == "wget":
+                return (
+                    "wget: missing URL\n"
+                    "Usage: wget [OPTION]... [URL]...\n\n"
+                    "Try `wget --help' for more options.\n"
+                )
+            return (
+                "curl: try 'curl --help' or 'curl --manual' for more information\n"
+            )
+
+        size = dropper.size_for(download)
+
+        await session_manager.record_network_event(
+            session_id,
+            "file_download",
+            {
+                "tool": download.tool,
+                "url": download.url,
+                "host": download.host,
+                "port": download.port,
+                "filename": download.filename,
+                "piped_to_shell": download.piped,
+                "bytes": size,
+                # Recorded so an analyst reading the session knows the honeypot
+                # never actually retrieved the payload.
+                "fetched": False,
+            },
+        )
+
+        if download.saves:
+            shell = shell_states.get(session_id)
+            path = resolve_path(shell.cwd, download.target)
+            shell.add_file(
+                path,
+                DroppedFile(
+                    name=download.filename,
+                    size=size,
+                    source_url=download.url,
+                ),
+            )
+
+        return dropper.transcript(download, size)
 
     async def _ftp_response(
         self, session_id: str, interaction_type: str, data: dict, templates: dict

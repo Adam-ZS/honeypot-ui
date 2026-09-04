@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,7 +9,16 @@ from typing import Optional
 from app.core.database import get_db
 from app.core.security import get_current_user, require_role, verify_honeypot_token
 from app.models import HoneypotSession, HoneypotNode, AuditLog, SessionStatus, AttackCategory, AttackerProfile
-from app.schemas import HoneypotSessionResponse, SessionListResponse, SessionFilter
+from app.core.encryption import decrypt_data
+from app.schemas import (
+    HoneypotSessionResponse,
+    SessionListResponse,
+    SessionFilter,
+    SessionTranscriptResponse,
+    SessionCredentialsResponse,
+    TranscriptEntry,
+    CapturedCredential,
+)
 from app.api.export import FILE_EXTENSIONS, MEDIA_TYPES, _render
 from app.services.analysis import analysis_pipeline
 from app.services import enrichment
@@ -164,6 +175,122 @@ async def get_session_by_uuid(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return HoneypotSessionResponse.from_model(session)
+
+
+@router.get("/{session_id}/transcript", response_model=SessionTranscriptResponse)
+async def get_session_transcript(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """The commands the attacker ran and what the honeypot appeared to reply.
+
+    The transcript has been captured and encrypted since the pipeline was
+    written; nothing read it back out. It is the primary evidence a honeypot
+    produces, and it lived in a column no endpoint touched.
+
+    Kept off the session object and behind its own request on purpose: the
+    list view returns hundreds of sessions and none of them need to carry a
+    decrypted transcript, and separating it means the read can be audited.
+    """
+    session = (
+        await db.execute(
+            select(HoneypotSession).where(HoneypotSession.id == session_id)
+        )
+    ).scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.transcript_encrypted:
+        # Sessions ingested before transcripts were carried still have the
+        # command list, so fall back to it rather than showing nothing. The
+        # outputs are genuinely absent, and the client shows them as such.
+        if session.raw_commands_encrypted:
+            try:
+                commands = decrypt_data(session.raw_commands_encrypted).splitlines()
+            except ValueError:
+                raise HTTPException(
+                    status_code=422, detail="Stored transcript could not be decrypted"
+                )
+            return SessionTranscriptResponse(
+                session_id=session.id,
+                session_uuid=session.session_uuid,
+                available=bool(commands),
+                entries=[
+                    TranscriptEntry(command=c) for c in commands if c.strip()
+                ],
+            )
+        return SessionTranscriptResponse(
+            session_id=session.id,
+            session_uuid=session.session_uuid,
+            available=False,
+        )
+
+    try:
+        entries = json.loads(decrypt_data(session.transcript_encrypted))
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="Stored transcript could not be decrypted"
+        )
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=422, detail="Stored transcript is malformed")
+
+    return SessionTranscriptResponse(
+        session_id=session.id,
+        session_uuid=session.session_uuid,
+        available=bool(entries),
+        entries=[TranscriptEntry(**e) for e in entries if isinstance(e, dict)],
+        truncated=len(entries) >= 500,
+    )
+
+
+@router.get("/{session_id}/credentials", response_model=SessionCredentialsResponse)
+async def get_session_credentials(
+    session_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role("admin")),
+):
+    """Username/password pairs tried against the honeypot.
+
+    Admin-only and audit-logged, unlike everything else on a session. These
+    are live credentials in circulation against real hosts: whoever reads them
+    can go and use them, so the read itself is an event worth recording.
+    """
+    session = (
+        await db.execute(
+            select(HoneypotSession).where(HoneypotSession.id == session_id)
+        )
+    ).scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    db.add(
+        AuditLog(
+            user_id=current_user["id"],
+            action="credentials_viewed",
+            resource_type="session",
+            resource_id=session.id,
+            ip_address=request.client.host if request.client else None,
+        )
+    )
+    await db.commit()
+
+    if not session.credentials_encrypted:
+        return SessionCredentialsResponse(session_id=session.id, available=False)
+
+    try:
+        rows = json.loads(decrypt_data(session.credentials_encrypted))
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(
+            status_code=422, detail="Stored credentials could not be read"
+        )
+
+    return SessionCredentialsResponse(
+        session_id=session.id,
+        available=bool(rows),
+        credentials=[CapturedCredential(**r) for r in rows if isinstance(r, dict)],
+    )
 
 
 @router.post("/ingest")

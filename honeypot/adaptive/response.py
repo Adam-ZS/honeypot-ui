@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -242,6 +243,41 @@ class AdaptiveEngine:
 
     async def get_all_profiles(self) -> list[ActorProfile]:
         return list(self._profiles.values())
+
+    async def serialize_profiles(self) -> list[dict]:
+        """JSON-safe view of every profile, worst risk first.
+
+        The cross-session actor model was reachable only from inside the
+        process: the control API advertised /threat-actors but called a
+        method that did not exist, so the endpoint raised on every request.
+        Sorting by risk means the response leads with the actors an operator
+        would want to see rather than with dictionary insertion order.
+        """
+        profiles = sorted(
+            self._profiles.values(), key=lambda p: p.risk_score, reverse=True
+        )
+        return [
+            {
+                "ip_address": p.ip_address,
+                "actor_type": p.actor_type.value,
+                "confidence": round(p.confidence, 3),
+                "risk_score": round(p.risk_score, 3),
+                "session_count": p.session_count,
+                "total_commands": p.total_commands,
+                "unique_commands": p.unique_commands,
+                "auth_attempts": p.auth_attempts,
+                "attack_techniques": list(p.attack_techniques),
+                "tools_detected": list(p.tools_detected),
+                "first_seen": datetime.fromtimestamp(
+                    p.first_seen, tz=timezone.utc
+                ).isoformat(),
+                "last_seen": datetime.fromtimestamp(
+                    p.last_seen, tz=timezone.utc
+                ).isoformat(),
+                "session_ids": list(p.session_ids),
+            }
+            for p in profiles
+        ]
 
     async def get_high_risk_actors(self, threshold: float = 0.5) -> list[ActorProfile]:
         return [p for p in self._profiles.values() if p.risk_score >= threshold]
