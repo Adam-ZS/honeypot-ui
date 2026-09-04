@@ -92,6 +92,12 @@ async def list_sessions(
     country: Optional[str] = None,
     ip_address: Optional[str] = None,
     is_anomalous: Optional[bool] = None,
+    exclude_scanners: bool = Query(
+        False,
+        description="Hide sessions from known research scanners (Censys, "
+                    "Shodan, Shadowserver). They are recorded either way; this "
+                    "excludes them from the view.",
+    ),
     search: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -127,6 +133,13 @@ async def list_sessions(
     if is_anomalous is not None:
         query = query.where(HoneypotSession.is_anomalous == is_anomalous)
         count_query = count_query.where(HoneypotSession.is_anomalous == is_anomalous)
+    if exclude_scanners:
+        # A honeypot on a public address is scanned continuously by
+        # organisations that are not attacking it; counting their probes as
+        # attacks makes every figure incomparable.
+        scanner_filter = HoneypotSession.scanner_operator.is_(None)
+        query = query.where(scanner_filter)
+        count_query = count_query.where(scanner_filter)
     if search:
         pattern = f"%{_escape_like(search)}%"
         search_filter = (

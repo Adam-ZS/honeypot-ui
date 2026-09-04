@@ -295,6 +295,14 @@ class HoneypotSessionResponse(BaseModel):
     #: offer a request that returns nothing.
     has_transcript: bool = False
     has_credentials: bool = False
+    #: Set when the address belongs to a research scanner (Censys, Shodan,
+    #: Shadowserver). The session is still real data about what the internet
+    #: does to an exposed host; it is just not an attacker.
+    scanner_operator: Optional[str] = None
+    #: The full class distribution behind attack_confidence.
+    class_probabilities: Optional[dict] = None
+    #: Wall-clock analysis time in milliseconds, against NFR-2's 200 ms budget.
+    analysis_ms: Optional[float] = None
     created_at: datetime
 
     class Config:
@@ -347,6 +355,9 @@ class HoneypotSessionResponse(BaseModel):
             ],
             has_transcript=bool(obj.transcript_encrypted),
             has_credentials=bool(obj.credentials_encrypted),
+            scanner_operator=obj.scanner_operator,
+            class_probabilities=obj.class_probabilities,
+            analysis_ms=obj.analysis_ms,
             created_at=obj.created_at,
         )
 

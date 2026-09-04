@@ -17,6 +17,7 @@ from app.schemas import DashboardStats
 from app.services.geoip import geoip_service
 from app.services.alerting import alerting_service
 from app.services import thresholds
+from app.services.scanners import scanner_registry
 from app.core.encryption import encrypt_data
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,31 @@ def _parse_timestamp(value, fallback: datetime) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _summarise_packets(packets) -> Optional[Dict]:
+    """Counts and sizes by event type.
+
+    The raw list is unbounded and mostly redundant; the summary is what the
+    column was always meant to hold, and what a dashboard can aggregate.
+    """
+    if not packets:
+        return None
+    by_type: Dict[str, Dict[str, int]] = {}
+    total = 0
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        kind = str(packet.get("type") or "unknown")[:40]
+        size = int(packet.get("size") or 0)
+        entry = by_type.setdefault(kind, {"count": 0, "bytes": 0})
+        entry["count"] += 1
+        entry["bytes"] += size
+        total += size
+    if not by_type:
+        return None
+    return {"total_bytes": total, "count": sum(v["count"] for v in by_type.values()),
+            "by_type": by_type}
 
 
 def _looks_like_ip(value: str) -> bool:
@@ -206,6 +232,11 @@ class AnalysisPipeline:
             credentials_encrypted=credentials_encrypted,
             network_events=session_data.get("events") or [],
             keystroke_count=int(session_data.get("keystroke_count") or 0),
+            scanner_operator=scanner_registry.identify(attacker_ip),
+            class_probabilities=ai_result.get("probabilities"),
+            # The packet summary column has been indexed since the first
+            # migration and never written.
+            network_packets_summary=_summarise_packets(session_data.get("packets")),
             uploaded_files=[
                 str(u.get("filename") or u.get("url") or "")
                 for u in (session_data.get("uploads") or [])
@@ -276,6 +307,12 @@ class AnalysisPipeline:
                 analysis_ms,
                 ANALYSIS_BUDGET_MS,
             )
+
+        # Persisted, not just logged: NFR-2 is a claim about the system under
+        # real traffic, and a number that only ever reached a log line cannot
+        # be aggregated into evidence for it.
+        db_session.analysis_ms = round(analysis_ms, 2)
+        await db.commit()
 
         return {
             "session_id": db_session.id,

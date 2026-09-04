@@ -114,6 +114,15 @@ export default function SessionDetail({ session, onClose }) {
         <span className="tag" style={{ color: 'var(--color-paper-3)' }}>
           {PROFILE_LABEL[session.attacker_profile] || PROFILE_LABEL.unknown}
         </span>
+        {session.scanner_operator && (
+          <span
+            className="tag"
+            style={{ color: 'var(--color-paper-2)' }}
+            title="This address belongs to a public research scanner. The session is real, but it is not an attack."
+          >
+            {session.scanner_operator} scanner
+          </span>
+        )}
       </div>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-line px-4 py-3.5">

@@ -212,6 +212,22 @@ class HoneypotSession(Base):
     #: Retrieval and execution events the emulator observed: the C2 URLs a
     #: dropper reached for and the payloads it tried to run.
     network_events = Column(_jsonb(), nullable=True)
+
+    #: Which research organisation this address belongs to, when it belongs to
+    #: one. Censys, Shodan and Shadowserver scan every public address
+    #: continuously; counting their probes as attacks makes every figure the
+    #: project reports incomparable with anything.
+    scanner_operator = Column(String(50), nullable=True, index=True)
+
+    #: Full class distribution, not just the winning label and its probability.
+    #: A session at 0.34/0.33/0.33 and one at 0.98/0.01/0.01 are different
+    #: findings and were being stored identically.
+    class_probabilities = Column(_jsonb(), nullable=True)
+
+    #: Wall-clock analysis time. NFR-2 sets a 200 ms budget; it was measured
+    #: per session, logged when exceeded, and then discarded, so the
+    #: requirement could never be evidenced over real traffic.
+    analysis_ms = Column(Float, nullable=True)
     keystroke_count = Column(Integer, default=0, nullable=False, server_default="0")
 
     # Uploaded files

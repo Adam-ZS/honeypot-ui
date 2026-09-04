@@ -31,6 +31,10 @@ const EMPTY_FILTERS = {
   attack_category: '',
   country: '',
   is_anomalous: '',
+  // Off by default: hiding traffic silently would misrepresent what the
+  // honeypot saw. It is offered because scanner probes otherwise dominate
+  // every count.
+  exclude_scanners: '',
 }
 
 /** One row in the list. Compact — the detail panel carries the depth. */
@@ -293,6 +297,19 @@ export default function SessionLogs() {
               onChange={(e) => updateFilter('country', e.target.value.toUpperCase())}
               className="field w-20"
             />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="eyebrow">Research scanners</span>
+            <select
+              value={filters.exclude_scanners}
+              onChange={(e) => updateFilter('exclude_scanners', e.target.value)}
+              className="control"
+              title="Censys, Shodan and Shadowserver scan every public address continuously. They are always recorded; this decides whether they are shown."
+            >
+              <option value="">Include</option>
+              <option value="true">Exclude</option>
+            </select>
           </label>
 
           <label className="flex flex-col gap-1">
