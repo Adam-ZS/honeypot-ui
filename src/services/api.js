@@ -192,6 +192,13 @@ export const api = {
     stats: () => request('/alerts/stats'),
   },
 
+  iocs: {
+    list: (params = {}) => request(`/iocs/?${toQuery(params)}`),
+    forSession: (id) => request(`/iocs/session/${id}`),
+    // Plain text, one value per line — downloaded rather than rendered.
+    feed: (params = {}) => download(`/iocs/feed?${toQuery(params)}`),
+  },
+
   nodes: {
     list: (activeOnly = false) => request(`/nodes/?active_only=${activeOnly}`),
     get: (id) => request(`/nodes/${id}`),

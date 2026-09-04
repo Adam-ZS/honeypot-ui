@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { ChevronLeft, ChevronRight, Download, Search, SlidersHorizontal } from 'lucide-react'
 import { api } from '../services/api'
 import { useAuth } from '../context/useAuth'
@@ -106,6 +107,7 @@ export default function SessionLogs() {
   const [selected, setSelected] = useState(null)
   const [showFilters, setShowFilters] = useState(false)
   const [filters, setFilters] = useState(EMPTY_FILTERS)
+  const [searchParams] = useSearchParams()
 
   const debouncedSearch = useDebounced(filters.search)
   const canExport = hasRole('analyst')
@@ -131,9 +133,20 @@ export default function SessionLogs() {
       // Open on the first result rather than an empty detail pane, so the
       // page shows what it does before anything is clicked. Only when the
       // current selection is gone, so paging does not steal focus.
-      setSelected((current) =>
-        current && rows.some((r) => r.id === current.id) ? current : rows[0] ?? null,
-      )
+      //
+      // A ?session= parameter wins over both: it is how an alert links to the
+      // session that caused it, and arriving on the wrong row would make that
+      // link pointless. Fetched directly, because the session may not be on
+      // the page the list happens to be showing.
+      const requested = Number(searchParams.get('session'))
+      if (requested) {
+        const known = rows.find((r) => r.id === requested)
+        setSelected(known ?? (await api.sessions.get(requested).catch(() => null)))
+      } else {
+        setSelected((current) =>
+          current && rows.some((r) => r.id === current.id) ? current : rows[0] ?? null,
+        )
+      }
       setError(null)
     } catch (err) {
       setError(err.message)
@@ -142,7 +155,7 @@ export default function SessionLogs() {
     } finally {
       setLoading(false)
     }
-  }, [page, query])
+  }, [page, query, searchParams])
 
   useEffect(() => {
     const timer = setTimeout(fetchSessions, 0)

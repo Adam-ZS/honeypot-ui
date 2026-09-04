@@ -9,6 +9,8 @@ import DashboardLayout from './layouts/DashboardLayout'
 import Dashboard from './pages/Dashboard'
 import LiveMap from './pages/LiveMap'
 import SessionLogs from './pages/SessionLogs'
+import Alerts from './pages/Alerts'
+import Indicators from './pages/Indicators'
 import Settings from './pages/Settings'
 
 function AuthRoutes() {
@@ -39,6 +41,8 @@ function AuthRoutes() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/map" element={<LiveMap />} />
         <Route path="/sessions" element={<SessionLogs />} />
+        <Route path="/alerts" element={<Alerts />} />
+        <Route path="/indicators" element={<Indicators />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

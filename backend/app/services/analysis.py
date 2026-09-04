@@ -16,6 +16,7 @@ from app.schemas import DashboardStats
 # AI modules imported lazily below
 from app.services.geoip import geoip_service
 from app.services.alerting import alerting_service
+from app.services import thresholds
 from app.core.encryption import encrypt_data
 
 logger = logging.getLogger(__name__)
@@ -224,7 +225,14 @@ class AnalysisPipeline:
             )
             db.add(db_ioc)
 
-        if severity in (AttackSeverity.HIGH, AttackSeverity.CRITICAL):
+        # Alerting policy comes from the configured thresholds, not from a
+        # constant. An operator who sets a threshold and sees it saved is
+        # entitled to have it affect something.
+        decision = await thresholds.evaluate(
+            db, severity, anomaly_result["anomaly_score"]
+        )
+
+        if decision.should_alert:
             alert = Alert(
                 session_id=db_session.id,
                 severity=severity,
@@ -250,6 +258,10 @@ class AnalysisPipeline:
                 "mitre_techniques": mitre_result.get("techniques", []),
                 "timestamp": db_session.started_at.isoformat(),
                 "session_uuid": db_session.session_uuid,
+                # Which rule fired, so the operator reading the notification
+                # knows why it reached them.
+                "matched_thresholds": decision.matched,
+                "channels": {"email": decision.email, "webhook": decision.webhook},
             }
 
         await db.commit()

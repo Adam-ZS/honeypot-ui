@@ -7,6 +7,8 @@ import { api } from '../services/api'
 const NAV = [
   { to: '/', label: 'Overview' },
   { to: '/sessions', label: 'Sessions' },
+  { to: '/alerts', label: 'Alerts' },
+  { to: '/indicators', label: 'Indicators' },
   { to: '/map', label: 'Origins' },
   { to: '/settings', label: 'Settings' },
 ]
@@ -231,7 +233,7 @@ export default function DashboardLayout() {
                 className="panel absolute bottom-full left-2 right-2 z-50 mb-1 overflow-hidden"
               >
                 <NavLink
-                  to="/sessions"
+                  to="/alerts"
                   role="menuitem"
                   onClick={() => setAccountOpen(false)}
                   className="flex items-center gap-2 px-3 py-2 text-[13px] font-medium text-paper-2 transition-colors hover:bg-ink-2 hover:text-paper"
