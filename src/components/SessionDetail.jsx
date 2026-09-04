@@ -1,6 +1,10 @@
 import { ExternalLink, X } from 'lucide-react'
 import { CategoryTag } from './Severity'
 import { PROFILE_LABEL } from '../lib/severity'
+import SessionTranscript, {
+  CredentialsBlock,
+  RetrievalBlock,
+} from './SessionTranscript'
 
 /*
  * Session detail.
@@ -10,6 +14,14 @@ import { PROFILE_LABEL } from '../lib/severity'
  * and moving between rows keeps the same reading position on screen. Below
  * the large breakpoint it becomes a sheet, since there is no room for both.
  */
+
+/* What the classifier was actually running on when it produced the verdict. */
+const MODEL_SOURCE_NOTE = {
+  synthetic: 'Bootstrap model',
+  cicids2017: 'Trained · CIC-IDS2017',
+  pretrained: 'Trained model',
+  unloaded: 'No model loaded',
+}
 
 function percent(value) {
   return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '—'
@@ -102,6 +114,15 @@ export default function SessionDetail({ session, onClose }) {
         <span className="tag" style={{ color: 'var(--color-paper-3)' }}>
           {PROFILE_LABEL[session.attacker_profile] || PROFILE_LABEL.unknown}
         </span>
+        {session.scanner_operator && (
+          <span
+            className="tag"
+            style={{ color: 'var(--color-paper-2)' }}
+            title="This address belongs to a public research scanner. The session is real, but it is not an attack."
+          >
+            {session.scanner_operator} scanner
+          </span>
+        )}
       </div>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-line px-4 py-3.5">
@@ -121,10 +142,7 @@ export default function SessionDetail({ session, onClose }) {
         <Fact label="Commands">{session.command_count ?? 0}</Fact>
       </dl>
 
-      <Block
-        title="Model verdict"
-        note={session.model_source === 'synthetic' ? 'Bootstrap model' : undefined}
-      >
+      <Block title="Model verdict" note={MODEL_SOURCE_NOTE[session.model_source]}>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
           <Fact label="Confidence">{percent(session.attack_confidence)}</Fact>
           <Fact label="Anomaly score">
@@ -133,7 +151,29 @@ export default function SessionDetail({ session, onClose }) {
               : '—'}
           </Fact>
         </dl>
+        {session.model_source === 'synthetic' && (
+          <p className="mt-2.5 text-[12px] leading-relaxed text-paper-3">
+            This classifier has not been trained on captured traffic. Treat the
+            confidence above as a placeholder, not a measurement.
+          </p>
+        )}
+        {session.cluster?.fitted && (
+          <p className="mt-2.5 text-[12px] leading-relaxed text-paper-3">
+            Behaviourally grouped with cluster {session.cluster.cluster}
+            {session.cluster.is_outlier
+              ? ' — but far from its centre, so this session resembles nothing seen before.'
+              : '.'}
+          </p>
+        )}
       </Block>
+
+      {session.command_summary && (
+        <Block title="Summary">
+          <p className="whitespace-pre-line text-[13px] leading-relaxed text-paper-2">
+            {session.command_summary.slice(0, 600)}
+          </p>
+        </Block>
+      )}
 
       <Block title="Tools detected">
         <TagRow
@@ -177,6 +217,15 @@ export default function SessionDetail({ session, onClose }) {
                   <span className="min-w-0 flex-1 text-[13px] text-paper">
                     {technique.name}
                   </span>
+                  {technique.source === 'chimera' && (
+                    <span
+                      className="shrink-0 text-[11px]"
+                      style={{ color: 'var(--color-s2)' }}
+                      title="Inferred by the language model, not matched by the rule map"
+                    >
+                      inferred
+                    </span>
+                  )}
                   <ExternalLink
                     className="h-3 w-3 shrink-0 text-paper-3 opacity-0 transition-opacity group-hover:opacity-100"
                     strokeWidth={2}
@@ -187,6 +236,12 @@ export default function SessionDetail({ session, onClose }) {
           </ul>
         </Block>
       )}
+
+      <RetrievalBlock session={session} />
+      {/* Keyed so switching sessions remounts them and their loaded state
+          resets, rather than being cleared afterwards by an effect. */}
+      <SessionTranscript key={`t${session.id}`} session={session} />
+      <CredentialsBlock key={`c${session.id}`} session={session} />
 
       {session.uploaded_files?.length > 0 && (
         <Block title="Files uploaded" note={String(session.uploaded_files.length)}>

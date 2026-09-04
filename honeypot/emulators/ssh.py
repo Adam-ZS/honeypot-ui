@@ -31,6 +31,8 @@ import asyncssh
 
 from honeypot.core.config import config
 from honeypot.core.session import session_manager
+from honeypot.core.shell_state import shell_states
+from honeypot.adaptive.ssh_profile import apply_extra_kex_algs, get_profile
 from honeypot.core.modes import mode_handler
 from honeypot.emulators.base import BaseEmulator
 from honeypot.adaptive.fingerprint import fingerprint_engine
@@ -96,6 +98,7 @@ class _HoneypotSSHServer(asyncssh.SSHServer):
         if self.state.session_id:
             # connection_lost is synchronous; hand the close off to the loop.
             asyncio.create_task(session_manager.end_session(self.state.session_id))
+            shell_states.drop(self.state.session_id)
 
     async def begin_auth(self, username: str) -> bool:
         """Open the session here — the first point with a username and a loop.
@@ -173,6 +176,10 @@ class _HoneypotSSHServer(asyncssh.SSHServer):
             if username == "root":
                 state.is_root = True
                 state.cwd = "/root"
+                # Keep the emulator's view of the shell in step with the
+                # session's, or `pwd` and the prompt disagree from the first
+                # command.
+                shell_states.get(state.session_id).cwd = "/root"
             await adaptive_engine.profile_actor(
                 state.session_id,
                 self.source_ip,
@@ -221,8 +228,17 @@ class SSHHoneypot(BaseEmulator):
     async def rate_limit_ok(self, source_ip: str) -> bool:
         return await self._check_rate_limit(source_ip)
 
-    def _host_key(self) -> asyncssh.SSHKey:
-        """Load, or generate once and persist, the server host key.
+    #: Key types a stock Ubuntu or Debian sshd has, because the package
+    #: postinst generates all three. A server offering only ed25519 has been
+    #: deliberately configured, which is not what an ordinary host looks like.
+    HOST_KEY_TYPES = (
+        ("ssh-ed25519", "ssh_host_ed25519_key"),
+        ("ssh-rsa", "ssh_host_rsa_key"),
+        ("ecdsa-sha2-nistp256", "ssh_host_ecdsa_key"),
+    )
+
+    def _host_keys(self) -> list[asyncssh.SSHKey]:
+        """Load, or generate once and persist, the server host keys.
 
         Persisting matters: a host key that changes on every restart makes
         every returning client print a MITM warning, which is a louder
@@ -230,15 +246,26 @@ class SSHHoneypot(BaseEmulator):
         """
         key_dir = config.session_capture_dir
         os.makedirs(key_dir, exist_ok=True)
-        key_path = os.path.join(key_dir, "ssh_host_ed25519_key")
 
+        keys = []
+        for alg, filename in self.HOST_KEY_TYPES:
+            keys.append(self._load_or_create_key(os.path.join(key_dir, filename), alg))
+        return keys
+
+    def _load_or_create_key(self, key_path: str, alg: str) -> asyncssh.SSHKey:
         if os.path.exists(key_path):
             try:
                 return asyncssh.read_private_key(key_path)
             except Exception:
                 logger.warning("Host key at %s unreadable; regenerating", key_path)
 
-        key = asyncssh.generate_private_key("ssh-ed25519")
+        # RSA at 3072 bits, matching what ssh-keygen -A produces since
+        # OpenSSH 8.0. A 2048-bit key would be another small inconsistency.
+        key = (
+            asyncssh.generate_private_key(alg, key_size=3072)
+            if alg == "ssh-rsa"
+            else asyncssh.generate_private_key(alg)
+        )
         try:
             with open(key_path, "wb") as handle:
                 handle.write(key.export_private_key())
@@ -249,26 +276,36 @@ class SSHHoneypot(BaseEmulator):
         return key
 
     async def start(self) -> None:
-        banner = self.get_banner()
-        # asyncssh prepends "SSH-2.0-", so hand it only the software portion
-        # of whichever banner the rotation picked.
-        version = banner.split("SSH-2.0-", 1)[-1] if "SSH-2.0-" in banner else banner
+        # Banner and transport proposal come from one profile, not from two
+        # independent choices. Vetterl and Clayton (USENIX WOOT '18)
+        # fingerprint medium-interaction honeypots in a single packet by
+        # comparing the KEXINIT an off-the-shelf library sends against the one
+        # the claimed software actually sends; asyncssh's defaults offer 46 key
+        # exchange algorithms, including GSSAPI and ML-KEM, where OpenSSH 8.2
+        # offers nine. Pinning the proposal is what makes the banner true.
+        profile = get_profile(config.ssh_profile)
+        apply_extra_kex_algs(profile)
 
         self._acceptor = await asyncssh.listen(
             config.bind_address,
             self.port,
             server_factory=lambda: _HoneypotSSHServer(self),
-            server_host_keys=[self._host_key()],
+            server_host_keys=self._host_keys(),
             process_factory=self._handle_process,
-            server_version=version,
+            server_version=profile.version_string,
+            kex_algs=profile.kex_algs,
+            encryption_algs=profile.encryption_algs,
+            mac_algs=profile.mac_algs,
+            compression_algs=profile.compression_algs,
             encoding=None,
         )
         self._running = True
         logger.info(
-            "SSH honeypot listening on %s:%s as %s",
+            "SSH honeypot listening on %s:%s as %s (profile %s)",
             config.bind_address,
             self.port,
-            version,
+            profile.version_string,
+            profile.name,
         )
 
     async def stop(self) -> None:
@@ -311,21 +348,7 @@ class SSHHoneypot(BaseEmulator):
 
     async def _run_command(self, process, server, state, command: str) -> None:
         command = command[:MAX_COMMAND_LENGTH]
-        await session_manager.record_command(state.session_id, command, "", 0)
-        await adaptive_engine.profile_actor(
-            state.session_id, server.source_ip, {"command": command}
-        )
-        response = await mode_handler.handle_interaction(
-            state.session_id,
-            "ssh",
-            "command",
-            {
-                "command": command,
-                "username": state.username,
-                "cwd": state.cwd,
-                "is_root": state.is_root,
-            },
-        )
+        response = await self._dispatch(server, state, command)
         if response:
             process.stdout.write(response.encode())
         process.exit(0)
@@ -401,20 +424,36 @@ class SSHHoneypot(BaseEmulator):
                         process.stdout.write(char.encode())
 
     async def _run_interactive_command(self, process, server, state, command: str) -> None:
-        await session_manager.record_command(state.session_id, command, "", 0)
+        response = await self._dispatch(server, state, command)
+        if response:
+            process.stdout.write(response.encode())
+
+    async def _dispatch(self, server, state, command: str) -> str:
+        """Run one command and record it with what it actually printed.
+
+        Both call sites used to record the command with a hardcoded empty
+        output before the emulator had produced one, so every stored session
+        held commands with no responses. The transcript an analyst reads is
+        half the evidence: what the attacker typed only means something beside
+        what the machine appeared to tell them.
+        """
         await adaptive_engine.profile_actor(
             state.session_id, server.source_ip, {"command": command}
         )
+        payload = {
+            "command": command,
+            "username": state.username,
+            "cwd": state.cwd,
+            "is_root": state.is_root,
+        }
         response = await mode_handler.handle_interaction(
-            state.session_id,
-            "ssh",
-            "command",
-            {
-                "command": command,
-                "username": state.username,
-                "cwd": state.cwd,
-                "is_root": state.is_root,
-            },
+            state.session_id, "ssh", "command", payload
         )
-        if response:
-            process.stdout.write(response.encode())
+        # The emulator reports a directory change through the payload dict so
+        # the prompt and later commands agree with it.
+        if payload.get("cwd_after"):
+            state.cwd = payload["cwd_after"]
+        await session_manager.record_command(
+            state.session_id, command, response or "", 0
+        )
+        return response

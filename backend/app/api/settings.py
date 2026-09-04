@@ -14,7 +14,7 @@ router = APIRouter()
 
 
 def _to_response(t: AlertThreshold) -> AlertThresholdResponse:
-    return _to_response(t)
+    return AlertThresholdResponse.model_validate(t)
 
 
 @router.get("/thresholds", response_model=list[AlertThresholdResponse])

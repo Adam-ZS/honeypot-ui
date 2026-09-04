@@ -179,6 +179,9 @@ export const api = {
     list: (params = {}) => request(`/sessions/?${toQuery(params)}`),
     get: (id) => request(`/sessions/${id}`),
     getByUuid: (uuid) => request(`/sessions/uuid/${uuid}`),
+    transcript: (id) => request(`/sessions/${id}/transcript`),
+    // Admin only, and the read is audit-logged server side.
+    credentials: (id) => request(`/sessions/${id}/credentials`),
   },
 
   alerts: {
@@ -187,6 +190,13 @@ export const api = {
     update: (id, data) =>
       request(`/alerts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     stats: () => request('/alerts/stats'),
+  },
+
+  iocs: {
+    list: (params = {}) => request(`/iocs/?${toQuery(params)}`),
+    forSession: (id) => request(`/iocs/session/${id}`),
+    // Plain text, one value per line — downloaded rather than rendered.
+    feed: (params = {}) => download(`/iocs/feed?${toQuery(params)}`),
   },
 
   nodes: {

@@ -51,6 +51,15 @@ class SessionRecord:
             return datetime.fromtimestamp(self.end_time, tz=timezone.utc).isoformat()
         return None
 
+    #: Bounds on what one session may push. A session that runs thousands of
+    #: commands is either a fuzzer or an attempt to make the ingest endpoint
+    #: the expensive part of the system; either way the first few hundred
+    #: carry the behaviour and the rest are noise.
+    MAX_TRANSCRIPT_ENTRIES = 500
+    MAX_OUTPUT_CHARS = 4096
+    MAX_CREDENTIALS = 200
+    MAX_EVENTS = 200
+
     def to_backend_payload(self, node_id: int = 1) -> dict[str, Any]:
         command_strings = [c["command"] for c in self.commands]
         return {
@@ -73,6 +82,39 @@ class SessionRecord:
             "failed_logins": sum(
                 1 for a in self.authentication_attempts if not a["success"]
             ),
+            # Command/output pairs, not just the commands. What the machine
+            # appeared to say is half of what makes a transcript readable, and
+            # it is the only way to tell a command that worked from one that
+            # was refused.
+            "transcript": [
+                {
+                    "command": c["command"],
+                    "output": (c.get("output") or "")[: self.MAX_OUTPUT_CHARS],
+                    "exit_code": c.get("exit_code", 0),
+                    "timestamp": c["timestamp"],
+                }
+                for c in self.commands[: self.MAX_TRANSCRIPT_ENTRIES]
+            ],
+            # The credentials themselves, not a count of failures. A honeypot
+            # that discards these throws away its most directly actionable
+            # output: the password lists actually in circulation, which is
+            # what makes the capture worth defending against reuse.
+            "credentials": [
+                {
+                    "username": a["username"][:128],
+                    "password": a["password"][:128],
+                    "success": a["success"],
+                    "timestamp": a["timestamp"],
+                }
+                for a in self.authentication_attempts[: self.MAX_CREDENTIALS]
+            ],
+            "keystroke_count": len(self.keystrokes),
+            # Retrieval and execution events — where a dropper's C2 URL is.
+            "events": [
+                {k: v for k, v in e.items() if k != "timestamp"} | {"at": e["timestamp"]}
+                for e in self.network_events[: self.MAX_EVENTS]
+                if e.get("event_type") in ("file_download", "payload_execution")
+            ],
             "packets": [
                 {
                     "type": e.get("event_type", "unknown"),

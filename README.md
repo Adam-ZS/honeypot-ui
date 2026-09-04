@@ -65,9 +65,19 @@ Each ingested session runs through, in order:
 | Attacker profiling | Weighted indicator scorecard | automated bot / script kiddie / skilled / APT |
 | Behavioural clustering | Mini-batch k-means over 10 behavioural features | cluster id, centroid distance, outlier flag |
 | ATT&CK mapping | Tool + intent → technique lookup | tactic IDs and technique objects |
-| Severity | Composite score over the above | low / medium / high / critical |
+| Severity | Composite score over the above, then matched against the configured alert thresholds | low / medium / high / critical, and whether to alert |
 
-Raw commands and payloads are encrypted before they are stored.
+Sessions from known research scanners (Censys, Shodan, Rapid7, Shadowserver)
+are **attributed, not discarded**. A honeypot on a public address is scanned
+continuously by organisations that are not attacking it, and counting their
+probes as attacks makes every figure incomparable. They are labelled with the
+operator and can be excluded from any view; they are always recorded, because
+a honeypot that silently drops traffic cannot be audited. Point
+`SCANNER_LIST_PATH` at a [MISP warninglist](https://github.com/MISP/misp-warninglists)
+export to replace the built-in seed list.
+
+Raw commands, the command/output transcript, and captured credentials are
+encrypted with AES-256-GCM before they are stored.
 
 A **second stage runs asynchronously**, after the response has been returned.
 If `CHIMERA_URL` points at a local endpoint serving the project's fine-tuned
@@ -114,6 +124,23 @@ country filter show fewer events rather than invented ones.
 
 **Rate limiting is per-process and in-memory.** Correct for a single
 instance; running multiple workers needs a shared backend (Redis).
+
+**The SSH disguise is exact for OpenSSH 8.2p1 and nothing else.** Vetterl and
+Clayton ([USENIX WOOT '18](https://www.usenix.org/conference/woot18/presentation/vetterl))
+fingerprint medium-interaction honeypots with a single packet by comparing the
+KEXINIT an off-the-shelf transport library sends against the one the claimed
+software sends. This engine speaks SSH through asyncssh, so the banner and the
+transport proposal are pinned to one profile and match byte for byte — but only
+for 8.2p1, because asyncssh cannot implement `sntrup761x25519-sha512@openssh.com`
+and so cannot imitate 8.9 or later exactly. Imitating a version we can match
+perfectly is the deliberate trade. The disguise is still only transport-deep:
+timing, error-message wording and edge-case command behaviour remain
+fingerprintable.
+
+**The emulated shell has a small, bounded filesystem.** `cd` moves, downloads
+land where they were asked to land, and `chmod +x` then `./payload` behaves —
+enough for a dropper to run its chain to the end. It is not a real filesystem,
+and an attacker who explores beyond the emulated commands will notice.
 
 ---
 
@@ -181,7 +208,8 @@ npm ci && npm run dev
 ## Tests
 
 ```bash
-cd backend && pytest          # 70 tests
+cd backend && pytest          # 122 tests
+cd honeypot && pytest         # 50 tests
 npm run lint                  # eslint, zero warnings tolerated
 npm run build                 # production bundle
 ```
@@ -189,6 +217,11 @@ npm run build                 # production bundle
 The backend suite runs against in-memory SQLite and needs no external
 services. `backend/tests/test_regressions.py` holds one test per defect found
 during review, so those bugs cannot silently return.
+
+The engine suite reads the SSH transport proposal off a real socket rather
+than checking configuration, because what matters is what a scanner sees, and
+walks a full dropper chain — fetch, list, chmod, execute — through the
+emulated shell.
 
 ---
 
@@ -274,14 +307,19 @@ Bearer <access_token>`.
 | PATCH | `/api/v1/auth/users/{id}/role` | admin | Change a role |
 | GET | `/api/v1/dashboard/stats` | any | Aggregate statistics |
 | GET | `/api/v1/dashboard/live-events` | any | Recent sessions for the map |
-| GET | `/api/v1/sessions/` | any | List sessions (filter + paginate) |
+| GET | `/api/v1/sessions/` | any | List sessions (filter + paginate; `exclude_scanners` hides research scanners) |
 | GET | `/api/v1/sessions/{id}` | any | Session detail |
+| GET | `/api/v1/sessions/{id}/transcript` | any | Commands and what the honeypot appeared to reply |
+| GET | `/api/v1/sessions/{id}/credentials` | admin | Credentials tried — audit-logged on read |
 | POST | `/api/v1/sessions/{id}/export` | analyst | Export one session |
 | POST | `/api/v1/sessions/ingest` | analyst | Manual ingest |
 | POST | `/api/v1/sessions/ingest-internal` | token | Engine ingest |
 | GET | `/api/v1/alerts/` | any | List alerts |
 | GET | `/api/v1/alerts/stats` | any | Alert counts by status/severity |
 | PATCH | `/api/v1/alerts/{id}` | analyst | Triage an alert |
+| GET | `/api/v1/iocs/` | any | Indicators, grouped by value and ranked by how many sessions saw each |
+| GET | `/api/v1/iocs/session/{id}` | any | Indicators from one session |
+| GET | `/api/v1/iocs/feed` | any | Plain-text blocklist, one value per line |
 | GET | `/api/v1/nodes/` | any | List nodes |
 | POST | `/api/v1/nodes/` | admin | Create a node |
 | POST | `/api/v1/nodes/register-internal` | token | Engine self-registration |

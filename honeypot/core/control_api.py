@@ -163,7 +163,7 @@ def build_control_api(service) -> ControlAPI:
 
     @api.route("GET", "/threat-actors")
     async def threat_actors(_body: dict) -> dict:
-        return {"actors": adaptive_engine.serialize_profiles()}
+        return {"actors": await adaptive_engine.serialize_profiles()}
 
     @api.route("GET", "/sessions/active")
     async def active_sessions(_body: dict) -> dict:

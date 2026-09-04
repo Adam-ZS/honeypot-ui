@@ -24,7 +24,7 @@ def _parse_enum(enum_cls, value: str, field: str):
 
 
 def _to_response(alert: Alert) -> AlertResponse:
-    return _to_response(alert)
+    return AlertResponse.model_validate(alert)
 
 
 @router.get("/", response_model=AlertListResponse)

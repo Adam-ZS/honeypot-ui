@@ -47,13 +47,25 @@ class AlertingService:
         except ValueError:
             severity = AttackSeverity.LOW
 
-        if severity not in (AttackSeverity.HIGH, AttackSeverity.CRITICAL):
+        # Channels come from the thresholds that matched. The severity gate
+        # that used to live here silently overrode them: a rule configured to
+        # notify on MEDIUM raised its alert and then had the notification
+        # dropped one layer down, which is the hardest kind of setting to
+        # debug — it does exactly half of what it says.
+        channels = alert_data.get("channels")
+        if channels is None:
+            channels = {
+                "email": severity in (AttackSeverity.HIGH, AttackSeverity.CRITICAL),
+                "webhook": severity in (AttackSeverity.HIGH, AttackSeverity.CRITICAL),
+            }
+
+        if not (channels.get("email") or channels.get("webhook")):
             return True
 
         results = []
-        if settings.ALERT_EMAIL_TO:
+        if channels.get("email") and settings.ALERT_EMAIL_TO:
             results.append(await self._send_email(alert_data))
-        if settings.WEBHOOK_URL:
+        if channels.get("webhook") and settings.WEBHOOK_URL:
             results.append(await self._send_webhook(alert_data))
 
         if not results:

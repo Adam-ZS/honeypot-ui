@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, Enum as SAEnum
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, Enum as SAEnum, JSON
 from sqlalchemy.dialects.postgresql import UUID, INET, JSONB
 from sqlalchemy.orm import relationship
 import enum
@@ -54,6 +54,21 @@ class AlertStatus(str, enum.Enum):
     FALSE_POSITIVE = "false_positive"
 
 
+def _jsonb():
+    """A JSONB column that still builds on SQLite.
+
+    Production is PostgreSQL and these columns are JSONB: it stores parsed,
+    which is what makes the GIN indexes and ``@>`` containment queries in
+    migration 003 possible. SQLite has no JSONB type at all, so the model
+    metadata could not be compiled against it — which broke every test in the
+    suite that creates tables, since the fixtures run on SQLite.
+
+    ``with_variant`` keeps one model definition serving both: JSONB where it
+    exists, plain JSON where it does not.
+    """
+    return JSONB().with_variant(JSON(), "sqlite")
+
+
 def _pg_enum(enum_cls):
     """A Postgres ENUM column that persists the member *value*, not its name.
 
@@ -99,7 +114,7 @@ class User(Base):
     # because both are password-equivalent if the database is read.
     totp_secret_encrypted = Column(Text, nullable=True)
     totp_enabled = Column(Boolean, default=False, nullable=False)
-    totp_recovery_hashes = Column(JSONB, nullable=True)
+    totp_recovery_hashes = Column(_jsonb(), nullable=True)
     totp_enrolled_at = Column(DateTime(timezone=True), nullable=True)
 
     alerts = relationship("Alert", back_populates="user", foreign_keys="Alert.assigned_to_id")
@@ -158,24 +173,65 @@ class HoneypotSession(Base):
     is_anomalous = Column(Boolean, default=False)
 
     # NLP results
-    detected_tools = Column(JSONB, nullable=True)
-    detected_intents = Column(JSONB, nullable=True)
+    detected_tools = Column(_jsonb(), nullable=True)
+    detected_intents = Column(_jsonb(), nullable=True)
     command_summary = Column(Text, nullable=True)
     command_count = Column(Integer, default=0, nullable=False)
 
     # MITRE ATT&CK
     #: List of tactic id strings, e.g. ["TA0001"].
-    mitre_tactics = Column(JSONB, nullable=True)
+    mitre_tactics = Column(_jsonb(), nullable=True)
     #: List of technique objects, e.g. [{"id": "T1110", "name": "Brute Force"}].
-    mitre_techniques = Column(JSONB, nullable=True)
+    mitre_techniques = Column(_jsonb(), nullable=True)
+
+    # Provenance of the verdict above. The classifier already reports whether
+    # it is running on a trained model or on synthetic bootstrap data; that
+    # answer used to be discarded at the ingest boundary, so the UI could not
+    # tell an analyst how much the confidence figure was worth.
+    model_source = Column(String(32), nullable=True)
+
+    # Behavioural cluster, from the unsupervised model that runs beside the
+    # rule-based profile. Null until enough sessions exist to fit.
+    cluster_id = Column(Integer, nullable=True, index=True)
+    cluster_distance = Column(Float, nullable=True)
+    cluster_is_outlier = Column(Boolean, nullable=True)
 
     # Raw data (encrypted)
     raw_commands_encrypted = Column(Text, nullable=True)
     raw_payloads_encrypted = Column(Text, nullable=True)
-    network_packets_summary = Column(JSONB, nullable=True)
+    #: Command/output pairs in order, as encrypted JSON. Separate from
+    #: raw_commands_encrypted, which stays a newline-joined command list
+    #: because the enrichment and clustering paths read it that way.
+    transcript_encrypted = Column(Text, nullable=True)
+    #: Username/password pairs the attacker tried, as encrypted JSON. These
+    #: are credentials in active use against the internet and are the single
+    #: most sensitive thing the honeypot holds, so they are never stored in
+    #: the clear and never returned by a list endpoint.
+    credentials_encrypted = Column(Text, nullable=True)
+    network_packets_summary = Column(_jsonb(), nullable=True)
+    #: Retrieval and execution events the emulator observed: the C2 URLs a
+    #: dropper reached for and the payloads it tried to run.
+    network_events = Column(_jsonb(), nullable=True)
+
+    #: Which research organisation this address belongs to, when it belongs to
+    #: one. Censys, Shodan and Shadowserver scan every public address
+    #: continuously; counting their probes as attacks makes every figure the
+    #: project reports incomparable with anything.
+    scanner_operator = Column(String(50), nullable=True, index=True)
+
+    #: Full class distribution, not just the winning label and its probability.
+    #: A session at 0.34/0.33/0.33 and one at 0.98/0.01/0.01 are different
+    #: findings and were being stored identically.
+    class_probabilities = Column(_jsonb(), nullable=True)
+
+    #: Wall-clock analysis time. NFR-2 sets a 200 ms budget; it was measured
+    #: per session, logged when exceeded, and then discarded, so the
+    #: requirement could never be evidenced over real traffic.
+    analysis_ms = Column(Float, nullable=True)
+    keystroke_count = Column(Integer, default=0, nullable=False, server_default="0")
 
     # Uploaded files
-    uploaded_files = Column(JSONB, nullable=True)
+    uploaded_files = Column(_jsonb(), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -200,7 +256,7 @@ class IndicatorOfCompromise(Base):
     confidence = Column(Float, nullable=True)
     first_seen = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    tags = Column(JSONB, nullable=True)
+    tags = Column(_jsonb(), nullable=True)
 
     session = relationship("HoneypotSession", back_populates="iocs")
 
@@ -216,8 +272,8 @@ class Alert(Base):
     status = Column(_pg_enum(AlertStatus), default=AlertStatus.NEW, nullable=False)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     auto_generated = Column(Boolean, default=True)
-    mitre_tactics = Column(JSONB, nullable=True)
-    mitre_techniques = Column(JSONB, nullable=True)
+    mitre_tactics = Column(_jsonb(), nullable=True)
+    mitre_techniques = Column(_jsonb(), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
@@ -235,7 +291,7 @@ class AuditLog(Base):
     action = Column(String(100), nullable=False)
     resource_type = Column(String(50), nullable=True)
     resource_id = Column(Integer, nullable=True)
-    details = Column(JSONB, nullable=True)
+    details = Column(_jsonb(), nullable=True)
     ip_address = Column(String(45), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

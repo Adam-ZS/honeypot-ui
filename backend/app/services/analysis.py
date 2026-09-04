@@ -1,4 +1,6 @@
 from __future__ import annotations
+import ipaddress
+import json
 import logging
 import time
 from typing import Dict, List, Optional
@@ -14,6 +16,8 @@ from app.schemas import DashboardStats
 # AI modules imported lazily below
 from app.services.geoip import geoip_service
 from app.services.alerting import alerting_service
+from app.services import thresholds
+from app.services.scanners import scanner_registry
 from app.core.encryption import encrypt_data
 
 logger = logging.getLogger(__name__)
@@ -53,6 +57,39 @@ def _parse_timestamp(value, fallback: datetime) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _summarise_packets(packets) -> Optional[Dict]:
+    """Counts and sizes by event type.
+
+    The raw list is unbounded and mostly redundant; the summary is what the
+    column was always meant to hold, and what a dashboard can aggregate.
+    """
+    if not packets:
+        return None
+    by_type: Dict[str, Dict[str, int]] = {}
+    total = 0
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        kind = str(packet.get("type") or "unknown")[:40]
+        size = int(packet.get("size") or 0)
+        entry = by_type.setdefault(kind, {"count": 0, "bytes": 0})
+        entry["count"] += 1
+        entry["bytes"] += size
+        total += size
+    if not by_type:
+        return None
+    return {"total_bytes": total, "count": sum(v["count"] for v in by_type.values()),
+            "by_type": by_type}
+
+
+def _looks_like_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 class AnalysisPipeline:
@@ -139,6 +176,19 @@ class AnalysisPipeline:
         raw_commands_encrypted = encrypt_data("\n".join(commands)) if commands else None
         raw_payloads_encrypted = encrypt_data(payload) if payload else None
 
+        # Transcript and credentials are encrypted with the same AES-256-GCM
+        # as the command list. Credentials in particular are live passwords in
+        # circulation against real hosts; storing them readable would make the
+        # honeypot's database more dangerous than the attack it recorded.
+        transcript = session_data.get("transcript") or []
+        transcript_encrypted = (
+            encrypt_data(json.dumps(transcript)) if transcript else None
+        )
+        credentials = session_data.get("credentials") or []
+        credentials_encrypted = (
+            encrypt_data(json.dumps(credentials)) if credentials else None
+        )
+
         db_session = HoneypotSession(
             node_id=node_id,
             protocol=str(session_data.get("protocol") or "unknown")[:20],
@@ -172,8 +222,21 @@ class AnalysisPipeline:
             command_count=len(commands),
             mitre_tactics=mitre_result.get("tactic_ids", []),
             mitre_techniques=mitre_result.get("techniques", []),
+            model_source=ai_result.get("model_source"),
+            cluster_id=cluster_result.get("cluster"),
+            cluster_distance=cluster_result.get("distance"),
+            cluster_is_outlier=cluster_result.get("is_outlier"),
             raw_commands_encrypted=raw_commands_encrypted,
             raw_payloads_encrypted=raw_payloads_encrypted,
+            transcript_encrypted=transcript_encrypted,
+            credentials_encrypted=credentials_encrypted,
+            network_events=session_data.get("events") or [],
+            keystroke_count=int(session_data.get("keystroke_count") or 0),
+            scanner_operator=scanner_registry.identify(attacker_ip),
+            class_probabilities=ai_result.get("probabilities"),
+            # The packet summary column has been indexed since the first
+            # migration and never written.
+            network_packets_summary=_summarise_packets(session_data.get("packets")),
             uploaded_files=[
                 str(u.get("filename") or u.get("url") or "")
                 for u in (session_data.get("uploads") or [])
@@ -193,7 +256,14 @@ class AnalysisPipeline:
             )
             db.add(db_ioc)
 
-        if severity in (AttackSeverity.HIGH, AttackSeverity.CRITICAL):
+        # Alerting policy comes from the configured thresholds, not from a
+        # constant. An operator who sets a threshold and sees it saved is
+        # entitled to have it affect something.
+        decision = await thresholds.evaluate(
+            db, severity, anomaly_result["anomaly_score"]
+        )
+
+        if decision.should_alert:
             alert = Alert(
                 session_id=db_session.id,
                 severity=severity,
@@ -219,6 +289,10 @@ class AnalysisPipeline:
                 "mitre_techniques": mitre_result.get("techniques", []),
                 "timestamp": db_session.started_at.isoformat(),
                 "session_uuid": db_session.session_uuid,
+                # Which rule fired, so the operator reading the notification
+                # knows why it reached them.
+                "matched_thresholds": decision.matched,
+                "channels": {"email": decision.email, "webhook": decision.webhook},
             }
 
         await db.commit()
@@ -233,6 +307,12 @@ class AnalysisPipeline:
                 analysis_ms,
                 ANALYSIS_BUDGET_MS,
             )
+
+        # Persisted, not just logged: NFR-2 is a claim about the system under
+        # real traffic, and a number that only ever reached a log line cannot
+        # be aggregated into evidence for it.
+        db_session.analysis_ms = round(analysis_ms, 2)
+        await db.commit()
 
         return {
             "session_id": db_session.id,
@@ -273,7 +353,45 @@ class AnalysisPipeline:
                 if sha:
                     iocs.append({"type": "file_hash", "value": sha, "confidence": 0.9, "tags": ["uploaded_malware"]})
 
-        return iocs
+        # Retrieval events are the highest-confidence indicators the honeypot
+        # produces. An attacker who types a URL might be pasting from a blog;
+        # one whose dropper fetched it chose it. The URL, the host and the
+        # payload name are each recorded, because a takedown request needs the
+        # host and a detection rule needs the filename.
+        for event in session_data.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            if event.get("event_type") != "file_download":
+                continue
+            url, host = event.get("url"), event.get("host")
+            tags = ["c2_url", "dropper"] + (["piped_to_shell"] if event.get("piped_to_shell") else [])
+            if url:
+                iocs.append({"type": "url", "value": str(url)[:500], "confidence": 0.95, "tags": tags})
+            if host and host != attacker_ip:
+                ioc_type = "ip" if _looks_like_ip(str(host)) else "domain"
+                iocs.append({
+                    "type": ioc_type,
+                    "value": str(host)[:500],
+                    "confidence": 0.9,
+                    "tags": ["c2_host", "dropper"],
+                })
+            if event.get("filename"):
+                iocs.append({
+                    "type": "filename",
+                    "value": str(event["filename"])[:500],
+                    "confidence": 0.75,
+                    "tags": ["payload_name"],
+                })
+
+        # De-duplicate: a session that fetches the same stage twice should not
+        # write the indicator twice.
+        seen, unique = set(), []
+        for ioc in iocs:
+            key = (ioc["type"], ioc["value"])
+            if key not in seen:
+                seen.add(key)
+                unique.append(ioc)
+        return unique
 
     def _determine_severity(
         self,
