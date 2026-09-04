@@ -57,6 +57,12 @@ class HoneypotConfig:
     https_port: int = int(os.getenv("HONEYPOT_HTTPS_PORT", "8443"))
 
     bind_address: str = os.getenv("HONEYPOT_BIND_ADDRESS", "0.0.0.0")
+
+    #: Which OpenSSH release the SSH emulator imitates — banner and transport
+    #: proposal together. See honeypot/adaptive/ssh_profile.py; the profile
+    #: exists because the two used to be chosen independently, which is
+    #: fingerprintable in one packet.
+    ssh_profile: str = os.getenv("HONEYPOT_SSH_PROFILE", "openssh-8.2p1-ubuntu")
     max_connections_per_ip: int = int(os.getenv("HONEYPOT_MAX_CONN_PER_IP", "5"))
     connection_timeout: int = int(os.getenv("HONEYPOT_CONN_TIMEOUT", "300"))
     rate_limit_per_minute: int = int(os.getenv("HONEYPOT_RATE_LIMIT", "60"))
