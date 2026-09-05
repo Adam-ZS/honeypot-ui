@@ -11,7 +11,7 @@ and a workspace for investigating suspicious activity.
 
 </div>
 
-> **Capstone project · Adam-ZS's development fork**  
+> **Capstone project · Adam-ZS's development fork**
 > Built collaboratively from [mandoof1/honeypot-ui](https://github.com/mandoof1/honeypot-ui).
 > This fork includes the investigation, export, reliability, and documentation improvements
 > submitted upstream in [pull request #1](https://github.com/mandoof1/honeypot-ui/pull/1).
