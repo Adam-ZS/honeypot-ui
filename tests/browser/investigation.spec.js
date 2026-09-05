@@ -163,3 +163,44 @@ test('widening an open mobile sheet releases the document', async ({ page }) => 
   await page.getByRole('button', { name: /192\.0\.2\.10/ }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
 })
+
+// Regression: the debounce decided what was sent, never whether to send. Typing
+// four characters issued five list requests, four carrying a stale search term.
+test('typing a search term issues one list request, not one per keystroke', async ({ page }) => {
+  const searches = []
+  await page.route('**/api/v1/sessions/?*', async (route) => {
+    searches.push(new URL(route.request().url()).searchParams.get('search') ?? '')
+    await route.fulfill({ json: { sessions: [session], total: 1 } })
+  })
+  await page.goto('/sessions')
+  await expect(page.getByText('1 matching session', { exact: true })).toBeVisible()
+  searches.length = 0
+  await page.getByLabel('Search sessions by address or session ID').pressSequentially('root', { delay: 120 })
+  await expect.poll(() => searches).toEqual(['root'])
+})
+
+// Regression: free-text filters pushed one history entry per character, so Back
+// walked "AE" back to "A" instead of leaving the view. They now replace, as the
+// search box always has: a typed refinement is not a navigation step.
+test('typing a filter adds no per-character history entries', async ({ page }) => {
+  await page.goto('/sessions')
+  await expect(page.getByText('1 matching session', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /filters/i }).click()
+  const before = await page.evaluate(() => history.length)
+  const country = page.getByPlaceholder('NL')
+  await country.click()
+  await country.pressSequentially('AE', { delay: 120 })
+  await expect(page).toHaveURL(/country=AE/)
+  expect(await page.evaluate(() => history.length)).toBe(before)
+})
+
+// A select is one decision, so it still earns an entry Back can undo.
+test('a dropdown filter remains undoable with back', async ({ page }) => {
+  await page.goto('/sessions')
+  await expect(page.getByText('1 matching session', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /filters/i }).click()
+  await page.getByRole('combobox', { name: 'Protocol', exact: true }).selectOption('ssh')
+  await expect(page).toHaveURL(/protocol=ssh/)
+  await page.goBack()
+  await expect(page).not.toHaveURL(/protocol=/)
+})

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ChevronLeft, ChevronRight, Download, Search, SlidersHorizontal, RefreshCw, Link as LinkIcon } from 'lucide-react'
 import { api } from '../services/api'
@@ -39,6 +39,9 @@ const EXPORT_FORMATS = [
   { id: 'cef', label: 'CEF', hint: 'ArcSight and syslog collectors' },
   { id: 'stix', label: 'STIX', hint: 'Threat intelligence platforms' },
 ]
+
+/** Typed into character by character, so they must not each push history. */
+const TEXT_FILTERS = new Set(['search', 'country'])
 
 const EMPTY_FILTERS = {
   search: '',
@@ -138,19 +141,26 @@ export default function SessionLogs() {
   const [showFilters, setShowFilters] = useState(() => [...searchParams.keys()].some((key) => key in EMPTY_FILTERS && key !== 'search'))
   const [mobileOpen, setMobileOpen] = useState(() => Boolean(searchParams.get('session')) && window.matchMedia('(max-width: 1023px)').matches)
   const [notice, setNotice] = useState('')
-  const activeRequest = useRef(null)
   const [reload, setReload] = useState(0)
 
   const debouncedSearch = useDebounced(filters.search)
   const canExport = hasRole('analyst')
 
-  const query = useMemo(
-    () => ({ ...filters, search: debouncedSearch,
-      date_from: filters.date_from ? toApiDate(filters.date_from) : '',
-      date_to: filters.date_to ? toApiDate(filters.date_to) : '',
-    }),
-    [filters, debouncedSearch],
-  )
+  // Keyed on the *debounced* search, not the raw input. Keying this on
+  // `filters` gave it a new identity per keystroke, so the fetch effect refired
+  // on each one — carrying the stale search value — and the debounce only chose
+  // what was sent, never whether to send at all. Typing four characters issued
+  // five list requests, four of them for a search term the user had moved past.
+  const queryKey = useMemo(() => {
+    const base = JSON.parse(filterKey)
+    return JSON.stringify({
+      ...base,
+      search: debouncedSearch,
+      date_from: base.date_from ? toApiDate(base.date_from) : '',
+      date_to: base.date_to ? toApiDate(base.date_to) : '',
+    })
+  }, [filterKey, debouncedSearch])
+  const query = useMemo(() => JSON.parse(queryKey), [queryKey])
 
   const activeFilterCount = useMemo(
     () =>
@@ -162,7 +172,6 @@ export default function SessionLogs() {
 
   useEffect(() => {
     const controller = new AbortController()
-    activeRequest.current = controller
     const options = { signal: controller.signal }
     const load = async () => {
       setLoading(true)
@@ -219,8 +228,11 @@ export default function SessionLogs() {
     return () => desktop.removeEventListener('change', closeOnDesktop)
   }, [])
 
+  // No explicit abort here: the fetch effect's cleanup already aborts whenever
+  // the request identity changes. Aborting on any parameter change instead left
+  // `loading` stuck true whenever the URL moved without the request following
+  // it — which, now that typing no longer refetches, is every keystroke.
   const changeParams = (changes, replace = false) => {
-    if (Object.keys(changes).some((key) => key !== 'session')) activeRequest.current?.abort()
     setSearchParams((current) => {
       const next = new URLSearchParams(current)
       Object.entries(changes).forEach(([key, value]) => {
@@ -238,7 +250,10 @@ export default function SessionLogs() {
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
-  const updateFilter = (key, value) => changeParams({ [key]: key.startsWith('date_') && value ? toApiDate(value) : value, page: '', session: '' }, key === 'search')
+  // Free-text filters replace rather than push: a select is one decision and
+  // earns a history entry, but a text field would otherwise leave one entry per
+  // character, so Back walked "AE" back to "A" instead of clearing the filter.
+  const updateFilter = (key, value) => changeParams({ [key]: key.startsWith('date_') && value ? toApiDate(value) : value, page: '', session: '' }, TEXT_FILTERS.has(key))
   const clearFilters = () => changeParams({ ...EMPTY_FILTERS, page: '', session: '' })
   const shareView = async () => {
     try {
