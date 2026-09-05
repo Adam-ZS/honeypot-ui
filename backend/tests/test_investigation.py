@@ -4,9 +4,11 @@ import io
 import json
 from datetime import datetime, timezone
 from uuid import UUID
+from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from app.models import HoneypotNode, HoneypotSession, SessionStatus, AttackCategory, UserRole
 
 
@@ -100,3 +102,49 @@ async def test_browser_can_read_export_metadata(client, auth_headers):
     response = await client.post("/api/v1/export/", headers=headers)
     exposed = response.headers["access-control-expose-headers"].lower()
     assert all(name in exposed for name in ["content-disposition", "x-export-count", "x-export-truncated"])
+
+
+@pytest.mark.parametrize("summary", ['=WEBSERVICE("https://example.invalid")', '  +SUM(1,2)', '\tcmd', 'echo "hello, world"\nwhoami'])
+async def test_csv_exports_attacker_command_summary_safely(client, auth_headers, records, db_session, summary):
+    session = (await db_session.execute(select(HoneypotSession).where(HoneypotSession.protocol == "http"))).scalar_one()
+    session.command_summary = summary
+    await db_session.commit()
+    response = await client.post("/api/v1/export/", params={"format": "csv", "protocol": "http"}, headers=await auth_headers())
+    assert response.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert len(rows) == 1
+    expected = summary if summary.startswith("echo") else "'" + summary
+    assert rows[0]["Command summary"] == expected
+
+
+async def test_seeded_protocols_are_filterable_and_exportable(client, auth_headers, db_session, monkeypatch):
+    from app import seed
+
+    @asynccontextmanager
+    async def factory():
+        yield db_session
+
+    monkeypatch.setattr("app.core.database.async_session_factory", factory)
+    monkeypatch.setenv("ADMIN_SEED_PASSWORD", "test-only-seed-password")
+    monkeypatch.setattr(seed, "SESSION_COUNT", len(seed.ATTACK_TYPES))
+    await seed.seed_database()
+    headers = await auth_headers()
+    listing = await client.get("/api/v1/sessions/", headers=headers)
+    rows = listing.json()["sessions"]
+    assert {row["protocol"] for row in rows} == {"ssh", "ftp", "http", "https"}
+    for protocol in ("ssh", "ftp", "http", "https"):
+        expected = [row["session_uuid"] for row in rows if row["protocol"] == protocol]
+        filtered = await client.get("/api/v1/sessions/", params={"protocol": protocol}, headers=headers)
+        exported = await client.post("/api/v1/export/", params={"protocol": protocol}, headers=headers)
+        assert filtered.status_code == exported.status_code == 200
+        assert [row["session_uuid"] for row in filtered.json()["sessions"]] == expected
+        assert [row["session"]["uuid"] for row in exported.json()] == expected
+
+
+def test_scanner_filter_is_documented_on_both_endpoints():
+    from app.main import app
+    schema = app.openapi()
+    for path, method in [("/api/v1/sessions/", "get"), ("/api/v1/export/", "post")]:
+        param = next(p for p in schema["paths"][path][method]["parameters"] if p["name"] == "exclude_scanners")
+        assert "research scanners" in param["description"]
+        assert param["schema"]["default"] is False

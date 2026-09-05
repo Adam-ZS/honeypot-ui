@@ -126,10 +126,14 @@ export default function SessionLogs() {
   const [error, setError] = useState(null)
   const [exporting, setExporting] = useState(null)
   const [selected, setSelected] = useState(null)
+  const [detailError, setDetailError] = useState(null)
   const [searchParams, setSearchParams] = useSearchParams()
-  const filters = useMemo(() => Object.fromEntries(
+  // Selection is URL state, but must not change the list request's identity.
+  const filterKey = JSON.stringify(Object.fromEntries(
     Object.keys(EMPTY_FILTERS).map((key) => [key, searchParams.get(key) || '']),
-  ), [searchParams])
+  ))
+  const filters = useMemo(() => JSON.parse(filterKey), [filterKey])
+  const requested = Number(searchParams.get('session')) || null
   const page = Math.max(1, Math.min(1000000, Math.floor(Number(searchParams.get('page'))) || 1))
   const [showFilters, setShowFilters] = useState(() => [...searchParams.keys()].some((key) => key in EMPTY_FILTERS && key !== 'search'))
   const [mobileOpen, setMobileOpen] = useState(() => Boolean(searchParams.get('session')) && window.matchMedia('(max-width: 1023px)').matches)
@@ -166,13 +170,8 @@ export default function SessionLogs() {
         const data = await api.sessions.list({ page, page_size: PAGE_SIZE, ...query }, options)
         if (controller.signal.aborted) return
         const rows = data.sessions || []
-        const requested = Number(searchParams.get('session'))
-        let detail = rows.find((row) => row.id === requested)
-        if (requested && !detail) detail = await api.sessions.get(requested, options)
-        if (controller.signal.aborted) return
         setSessions(rows)
         setTotal(data.total || 0)
-        setSelected((current) => requested ? detail : rows.find((row) => row.id === current?.id) ?? rows[0] ?? null)
         setError(null)
       } catch (err) {
         if (controller.signal.aborted) return
@@ -186,10 +185,42 @@ export default function SessionLogs() {
     }
     const timer = setTimeout(load, 0)
     return () => { controller.abort(); clearTimeout(timer) }
-  }, [page, query, searchParams, reload])
+  }, [page, query, reload])
+
+  // Missing or slow deep-link details must not hide a successful list result.
+  useEffect(() => {
+    if (loading) return
+    const controller = new AbortController()
+    const loadDetail = async () => {
+      setDetailError(null)
+      const row = sessions.find((item) => item.id === requested)
+      if (!requested || row) {
+        setSelected(row || sessions[0] || null)
+        return
+      }
+      setSelected(null)
+      try {
+        const detail = await api.sessions.get(requested, { signal: controller.signal })
+        if (!controller.signal.aborted) setSelected(detail)
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setDetailError(`Unable to open the linked session: ${err.message}. You can still browse the matching sessions.`)
+        }
+      }
+    }
+    const timer = setTimeout(loadDetail, 0)
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [requested, sessions, loading])
+
+  useEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1024px)')
+    const closeOnDesktop = () => { if (desktop.matches) setMobileOpen(false) }
+    desktop.addEventListener('change', closeOnDesktop)
+    return () => desktop.removeEventListener('change', closeOnDesktop)
+  }, [])
 
   const changeParams = (changes, replace = false) => {
-    activeRequest.current?.abort()
+    if (Object.keys(changes).some((key) => key !== 'session')) activeRequest.current?.abort()
     setSearchParams((current) => {
       const next = new URLSearchParams(current)
       Object.entries(changes).forEach(([key, value]) => {
@@ -233,7 +264,8 @@ export default function SessionLogs() {
       link.click()
       link.remove()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
-      setNotice(truncated ? `Exported the newest ${count.toLocaleString()} matching sessions. Narrow the filters to include the remaining records.` : `Exported ${count.toLocaleString()} matching sessions.`)
+      const matches = `${count.toLocaleString()} matching session${count === 1 ? '' : 's'}`
+      setNotice(truncated ? `Exported the newest ${matches}. Narrow the filters to include the remaining records.` : `Exported ${matches}.`)
       setError(null)
     } catch (err) {
       setError(`Export failed: ${err.message}`)
@@ -257,6 +289,7 @@ export default function SessionLogs() {
       </header>
       {notice && <div role="status" className="panel flex items-center justify-between gap-3 p-3 text-sm text-paper-2">{notice}<button className="control" onClick={() => setNotice('')} aria-label="Dismiss notification">Dismiss</button></div>}
       {error && <ErrorBanner message={error} onRetry={fetchSessions} />}
+      {detailError && <div role="status" className="panel p-3 text-sm text-paper-2">{detailError}</div>}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -399,7 +432,7 @@ export default function SessionLogs() {
       )}
 
       <div className="flex flex-wrap items-center gap-2 text-xs text-paper-2" aria-live="polite">
-        <span className="readout">{loading ? 'Searching…' : `${total.toLocaleString()} matching sessions`}</span>
+        <span className="readout">{loading ? 'Searching…' : `${total.toLocaleString()} matching session${total === 1 ? '' : 's'}`}</span>
         {Object.entries(filters).filter(([, value]) => value).map(([key, value]) => (
           <button key={key} className="control text-xs" onClick={() => updateFilter(key, '')} aria-label={`Remove ${key.replaceAll('_', ' ')} filter`}>
             {key.replaceAll('_', ' ')}: {value} ×
@@ -486,4 +519,3 @@ export default function SessionLogs() {
     </div>
   )
 }
-

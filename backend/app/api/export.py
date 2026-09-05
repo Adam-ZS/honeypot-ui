@@ -147,12 +147,14 @@ def _render(format: str, sessions: list[HoneypotSession]) -> str:
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow(["Session ID", "Source IP", "Protocol", "Country", "Started at",
-                         "Status", "Category", "Anomalous", "Research scanner", "Commands"])
+                         "Status", "Category", "Anomalous", "Research scanner", "Commands",
+                         "Command summary"])
         for session in sessions:
             values = [session.session_uuid, session.attacker_ip, session.protocol,
                       session.geo_country, session.started_at.isoformat(), session.status.value,
                       session.attack_category.value if session.attack_category else "unknown",
-                      session.is_anomalous, session.scanner_operator, session.command_count]
+                      session.is_anomalous, session.scanner_operator, session.command_count,
+                      session.command_summary]
             # Spreadsheet programs interpret attacker-controlled leading symbols as formulas.
             writer.writerow([_csv_cell(value) for value in values])
         return output.getvalue()

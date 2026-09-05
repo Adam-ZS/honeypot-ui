@@ -1,8 +1,8 @@
 """One filter contract for the session browser and all export formats."""
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Query
 from sqlalchemy import select
 from app.models import HoneypotSession, SessionStatus, AttackCategory, AttackerProfile
 
@@ -34,7 +34,10 @@ def session_filters(
     country: Optional[str] = None,
     ip_address: Optional[str] = None,
     is_anomalous: Optional[bool] = None,
-    exclude_scanners: bool = False,
+    exclude_scanners: Annotated[bool, Query(description=(
+        "Hide sessions attributed to research scanners such as Censys, Shodan and "
+        "Shadowserver. Sessions remain recorded; included by default."
+    ))] = False,
     search: Optional[str] = None,
     protocol: Optional[str] = None,
     date_from: Optional[datetime] = None,

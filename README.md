@@ -11,10 +11,7 @@ and a workspace for investigating suspicious activity.
 
 </div>
 
-> **Capstone project · Adam-ZS's development fork**
-> Built collaboratively from [mandoof1/honeypot-ui](https://github.com/mandoof1/honeypot-ui).
-> This fork includes the investigation, export, reliability, and documentation improvements
-> submitted upstream in [pull request #1](https://github.com/mandoof1/honeypot-ui/pull/1).
+**[Live demo](https://honeypot-ui-psi.vercel.app) · [API docs](https://honeysentinel-api.onrender.com/docs)**
 
 ![HoneySentinel investigation workspace with session filters, export controls, and an evidence panel](docs/images/investigation-desktop.png)
 
@@ -37,7 +34,7 @@ For the complete local stack, install **Docker Engine with Compose v2**, **Git**
 Docker builds the application dependencies for you.
 
 ```bash
-git clone https://github.com/Adam-ZS/honeypot-ui.git
+git clone https://github.com/mandoof1/honeypot-ui.git
 cd honeypot-ui
 ./start.sh
 ```
@@ -213,9 +210,9 @@ hosting service is insufficient for SSH and FTP capture.
 
 ## Team and contributions
 
-This is a collaborative capstone project maintained upstream by
+This is a collaborative capstone project maintained by
 [mandoof1](https://github.com/mandoof1/honeypot-ui), with development contributions from
-[Adam-ZS](https://github.com/Adam-ZS). The fork preserves the upstream history.
+[Adam-ZS](https://github.com/Adam-ZS).
 
 For changes: use a feature branch, describe the behavior before and after, and run the
 checks relevant to the change. Use synthetic fixtures in tests and screenshots.
