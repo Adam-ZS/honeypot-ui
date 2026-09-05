@@ -372,3 +372,45 @@ scripts/          GeoLite2 fetch
 ## License
 
 MIT
+
+## Investigation workspace
+
+The Sessions page supports protocol, country, category, status, anomaly,
+research-scanner, and start/end time filters. Search matches source addresses,
+session UUIDs, and command summaries. Filters, pagination, and the selected
+session are stored in the URL: use **Copy link** to share a view with another
+signed-in team member. Date controls show local time; links store absolute
+UTC timestamps so teammates in different time zones investigate the same window.
+
+**Export matches** applies the same filters as the list across all pages.
+Analysts and administrators can download CSV spreadsheet summaries, JSON,
+CEF, or STIX. Exports contain at most the newest 5,000 matching sessions; a
+notification explicitly identifies truncated exports. Narrow the filters to
+retrieve a smaller window. CSV cells neutralize leading spreadsheet formula
+characters. The API exposes `X-Export-Count`, `X-Export-Truncated`, and
+`Content-Disposition` to the browser. Export access remains audit-logged.
+
+Session details open alongside the list on desktop and in an Escape-dismissible
+modal on mobile. Refresh reloads the investigation; older requests are cancelled
+when filters or pages change. Background polling also invalidates results when
+its dependencies change. Downloads share the normal API token-refresh flow.
+
+### Development checks
+
+Use Node 24 and Python 3.12 (the backend pins packages with Python 3.12 wheels).
+
+```sh
+npm ci
+npm run check                  # ESLint, API client regression tests, production build
+npx playwright install chromium
+npm run test:e2e               # Desktop and mobile, with synthetic API fixtures
+python3.12 -m venv .venv
+.venv/bin/pip install -r backend/requirements-test.txt
+.venv/bin/python -m pytest backend/tests -q
+```
+
+To enable GitHub Actions, copy `docs/ci.yml.example` to `.github/workflows/ci.yml`
+using an account or token with workflow permissions. The template runs frontend
+checks, browser tests, and the backend suite on pull requests. Browser tests use synthetic records and mocked API responses;
+backend integration tests exercise the actual API against isolated SQLite.
+Neither suite requires production credentials or a running honeypot engine.

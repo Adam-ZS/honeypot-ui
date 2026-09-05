@@ -1,18 +1,21 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
+const API_BASE = import.meta.env?.VITE_API_URL || 'http://localhost:8000/api/v1'
 
 const ACCESS_TOKEN_KEY = 'access_token'
 const REFRESH_TOKEN_KEY = 'refresh_token'
+let tokenVersion = 0
 
 export function getAccessToken() {
   return localStorage.getItem(ACCESS_TOKEN_KEY)
 }
 
 export function setTokens({ access_token, refresh_token }) {
+  tokenVersion++
   if (access_token) localStorage.setItem(ACCESS_TOKEN_KEY, access_token)
   if (refresh_token) localStorage.setItem(REFRESH_TOKEN_KEY, refresh_token)
 }
 
 export function clearTokens() {
+  tokenVersion++
   localStorage.removeItem(ACCESS_TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
 }
@@ -40,6 +43,7 @@ async function refreshAccessToken() {
   if (!refreshToken) return false
 
   if (!refreshInFlight) {
+    const version = tokenVersion
     refreshInFlight = (async () => {
       try {
         const res = await fetch(`${API_BASE}/auth/refresh`, {
@@ -48,7 +52,9 @@ async function refreshAccessToken() {
           body: JSON.stringify({ refresh_token: refreshToken }),
         })
         if (!res.ok) return false
-        setTokens(await res.json())
+        const tokens = await res.json()
+        if (version !== tokenVersion || !tokens.access_token) return false
+        setTokens(tokens)
         return true
       } catch {
         return false
@@ -88,29 +94,38 @@ async function readError(res) {
   }
 }
 
-async function request(path, options = {}, { retry = true } = {}) {
+async function requestResponse(path, options = {}, { retry = true } = {}) {
+  const version = tokenVersion
+  const authenticated = !path.startsWith('/auth/') || path === '/auth/me'
   let res
   try {
     res = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers: buildHeaders(options.headers),
     })
-  } catch {
+  } catch (error) {
+    if (error.name === 'AbortError') throw error
     throw new ApiError('Cannot reach the API. Check your connection.', 0)
   }
 
-  if (res.status === 401 && retry) {
-    // Try to refresh once before giving up; previously any 401 wiped the
-    // session, so users were logged out every hour on the dot.
-    if (await refreshAccessToken()) {
-      return request(path, options, { retry: false })
+  if (res.status === 401 && authenticated) {
+    // Another request may already have rotated the token while this one ran.
+    if (retry && getAccessToken() && (version !== tokenVersion || await refreshAccessToken())) {
+      return requestResponse(path, options, { retry: false })
     }
-    clearTokens()
-    onUnauthorized()
+    if (version === tokenVersion) {
+      clearTokens()
+      onUnauthorized()
+    }
     throw new ApiError('Your session has expired. Please sign in again.', 401)
   }
 
   if (!res.ok) throw new ApiError(await readError(res), res.status)
+  return res
+}
+
+async function request(path, options = {}) {
+  const res = await requestResponse(path, options)
   if (res.status === 204) return null
 
   const contentType = res.headers.get('content-type') || ''
@@ -120,17 +135,15 @@ async function request(path, options = {}, { retry = true } = {}) {
 
 /** POST that returns the raw body plus its filename, for file downloads. */
 async function download(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: buildHeaders(options.headers),
-  })
-  if (!res.ok) throw new ApiError(await readError(res), res.status)
+  const res = await requestResponse(path, options)
 
   const disposition = res.headers.get('content-disposition') || ''
-  const match = disposition.match(/filename="?([^"]+)"?/)
+  const match = disposition.match(/filename="([^"]+)"|filename=([^;]+)/)
   return {
     blob: await res.blob(),
-    filename: match ? match[1] : 'export',
+    filename: match ? (match[1] || match[2]).trim() : 'export',
+    count: Number(res.headers.get('x-export-count') || 0),
+    truncated: res.headers.get('x-export-truncated') === 'true',
   }
 }
 
@@ -176,8 +189,8 @@ export const api = {
   },
 
   sessions: {
-    list: (params = {}) => request(`/sessions/?${toQuery(params)}`),
-    get: (id) => request(`/sessions/${id}`),
+    list: (params = {}, options = {}) => request(`/sessions/?${toQuery(params)}`, options),
+    get: (id, options = {}) => request(`/sessions/${id}`, options),
     getByUuid: (uuid) => request(`/sessions/uuid/${uuid}`),
     transcript: (id) => request(`/sessions/${id}/transcript`),
     // Admin only, and the read is audit-logged server side.

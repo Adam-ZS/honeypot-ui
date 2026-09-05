@@ -49,6 +49,9 @@ export function usePolledResource(loader, { intervalMs = 0, deps = [] } = {}) {
 
     return () => {
       mounted.current = false
+      // This is a request counter, not a DOM ref; invalidate pending work.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      requestId.current++
       clearTimeout(timer)
       if (interval) clearInterval(interval)
     }

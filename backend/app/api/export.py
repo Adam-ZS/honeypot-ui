@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
+from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -15,6 +18,7 @@ from app.core.database import get_db
 from app.core.security import require_role
 from app.models import AuditLog, HoneypotSession
 from app.services.report_generator import report_generator
+from app.services.session_filters import session_filters
 
 router = APIRouter()
 
@@ -23,12 +27,13 @@ router = APIRouter()
 MAX_EXPORT_SESSIONS = 5000
 
 MEDIA_TYPES = {
+    "csv": "text/csv",
     "json": "application/json",
     "cef": "text/plain",
     "stix": "application/json",
 }
 
-FILE_EXTENSIONS = {"json": "json", "cef": "cef", "stix": "json"}
+FILE_EXTENSIONS = {"csv": "csv", "json": "json", "cef": "cef", "stix": "json"}
 
 
 def _session_to_dict(session: HoneypotSession) -> dict:
@@ -77,10 +82,9 @@ def _session_to_analysis(session: HoneypotSession) -> dict:
 
 @router.post("/")
 async def export_sessions(
-    format: str = Query("json", pattern="^(json|cef|stix)$"),
+    format: str = Query("json", pattern="^(json|csv|cef|stix)$"),
     session_ids: Optional[list[int]] = Query(None),
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
+    filters=Depends(session_filters),
     db: AsyncSession = Depends(get_db),
     # Exports contain full attacker telemetry, so they are not a read-only
     # viewer capability.
@@ -95,16 +99,16 @@ async def export_sessions(
                 detail=f"At most {MAX_EXPORT_SESSIONS} sessions per export",
             )
         query = query.where(HoneypotSession.id.in_(session_ids))
-    if date_from:
-        query = query.where(HoneypotSession.started_at >= date_from)
-    if date_to:
-        query = query.where(HoneypotSession.started_at <= date_to)
+    if filters is not None:
+        query = query.where(filters)
 
-    query = query.order_by(HoneypotSession.started_at.desc()).limit(
-        MAX_EXPORT_SESSIONS
+    query = query.order_by(HoneypotSession.started_at.desc(), HoneypotSession.id.desc()).limit(
+        MAX_EXPORT_SESSIONS + 1
     )
     sessions = (await db.execute(query)).scalars().all()
 
+    truncated = len(sessions) > MAX_EXPORT_SESSIONS
+    sessions = sessions[:MAX_EXPORT_SESSIONS]
     content = _render(format, sessions)
 
     db.add(
@@ -112,7 +116,7 @@ async def export_sessions(
             user_id=current_user["id"],
             action="sessions_exported",
             resource_type="session",
-            details={"format": format, "count": len(sessions)},
+            details={"format": format, "count": len(sessions), "truncated": truncated},
         )
     )
     await db.commit()
@@ -123,7 +127,11 @@ async def export_sessions(
     return Response(
         content=content,
         media_type=MEDIA_TYPES[format],
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Export-Count": str(len(sessions)),
+            "X-Export-Truncated": str(truncated).lower(),
+        },
     )
 
 
@@ -135,6 +143,20 @@ def _render(format: str, sessions: list[HoneypotSession]) -> str:
     raised UnboundLocalError before reaching its own import, and every plain
     export returned a 500.
     """
+    if format == "csv":
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(["Session ID", "Source IP", "Protocol", "Country", "Started at",
+                         "Status", "Category", "Anomalous", "Research scanner", "Commands"])
+        for session in sessions:
+            values = [session.session_uuid, session.attacker_ip, session.protocol,
+                      session.geo_country, session.started_at.isoformat(), session.status.value,
+                      session.attack_category.value if session.attack_category else "unknown",
+                      session.is_anomalous, session.scanner_operator, session.command_count]
+            # Spreadsheet programs interpret attacker-controlled leading symbols as formulas.
+            writer.writerow([_csv_cell(value) for value in values])
+        return output.getvalue()
+
     pairs = [
         (_session_to_dict(session), _session_to_analysis(session))
         for session in sessions
@@ -157,7 +179,7 @@ def _render(format: str, sessions: list[HoneypotSession]) -> str:
                 continue
             objects.extend(bundle.get("objects", []))
         return json.dumps(
-            {"type": "bundle", "id": "bundle--1", "objects": objects}, indent=2
+            {"type": "bundle", "id": f"bundle--{uuid4()}", "objects": objects}, indent=2
         )
 
     reports = [
@@ -165,3 +187,8 @@ def _render(format: str, sessions: list[HoneypotSession]) -> str:
         for data, analysis in pairs
     ]
     return json.dumps(reports, indent=2, default=str)
+
+
+def _csv_cell(value):
+    text = "" if value is None else str(value)
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")) else text
