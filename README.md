@@ -208,11 +208,7 @@ hosting service is insufficient for SSH and FTP capture.
 | Only some records exported | Check the truncation notice and narrow the filters. |
 | Engine unreachable | Check container health, the control URL, and matching ingest tokens. |
 
-## Team and contributions
-
-This is a collaborative capstone project maintained by
-[mandoof1](https://github.com/mandoof1/honeypot-ui), with development contributions from
-[Adam-ZS](https://github.com/Adam-ZS).
+## Contributing
 
 For changes: use a feature branch, describe the behavior before and after, and run the
 checks relevant to the change. Use synthetic fixtures in tests and screenshots.
