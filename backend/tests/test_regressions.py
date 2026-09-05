@@ -478,3 +478,39 @@ def test_clusterer_reports_unfitted_rather_than_inventing_a_cluster():
 
     with pytest.raises(ValueError, match="at least"):
         fresh.fit(np.random.rand(MIN_SESSIONS_TO_FIT - 1, 10))
+
+
+def test_like_escaping_is_single_backslash():
+    """One implementation, and it escapes a single backslash, not a doubled one.
+
+    `iocs.py` carried its own copy that replaced the two-character sequence
+    `\\` and handed `ilike` a two-character escape. SQLAlchemy wants exactly
+    one character there.
+    """
+    from app.core.sql import LIKE_ESCAPE, escape_like
+
+    assert len(LIKE_ESCAPE) == 1
+    assert escape_like("100%_literal") == r"100\%\_literal"
+    assert escape_like("a\\b") == "a\\\\b"
+    assert escape_like("plain") == "plain"
+    # Backslashes are doubled first, or they would escape the escapes.
+    assert escape_like("\\%") == "\\\\\\%"
+
+
+def test_backend_parses_on_python_3_11():
+    """A backslash in an f-string expression is a syntax error before 3.12.
+
+    One such line in `iocs.py` made the whole suite unrunnable on 3.11 with an
+    error pointing nowhere near the tests.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    failures = []
+    for path in sorted(root.rglob("*.py")):
+        try:
+            ast.parse(path.read_text(), feature_version=(3, 11))
+        except SyntaxError as exc:
+            failures.append(f"{path.relative_to(root)}:{exc.lineno}: {exc.msg}")
+    assert not failures, "\n".join(failures)

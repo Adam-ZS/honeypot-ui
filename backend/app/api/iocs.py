@@ -20,6 +20,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.sql import LIKE_ESCAPE, escape_like
 from app.core.security import get_current_user
 from app.models import HoneypotSession, IndicatorOfCompromise
 from app.schemas import IndicatorOfCompromiseResponse
@@ -76,8 +77,10 @@ async def list_iocs(
     if ioc_type:
         grouped = grouped.where(IndicatorOfCompromise.ioc_type == ioc_type)
     if search:
-        pattern = f"%{search.replace('\\\\', '\\\\\\\\').replace('%', '\\\\%').replace('_', '\\\\_')}%"
-        grouped = grouped.where(IndicatorOfCompromise.value.ilike(pattern, escape="\\\\"))
+        pattern = f"%{escape_like(search)}%"
+        grouped = grouped.where(
+            IndicatorOfCompromise.value.ilike(pattern, escape=LIKE_ESCAPE)
+        )
 
     subquery = grouped.subquery()
     total = (await db.execute(select(func.count()).select_from(subquery))).scalar() or 0

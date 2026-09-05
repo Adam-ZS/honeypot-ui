@@ -4,12 +4,8 @@ from typing import Annotated, Optional
 
 from fastapi import HTTPException, Query
 from sqlalchemy import select
+from app.core.sql import LIKE_ESCAPE, escape_like
 from app.models import HoneypotSession, SessionStatus, AttackCategory, AttackerProfile
-
-def _escape_like(value: str) -> str:
-    """Neutralise LIKE wildcards in user-supplied search text."""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
 
 def _parse_enum(enum_cls, value: str, field: str):
     """Map a query-string value onto an enum, or raise 400.
@@ -58,8 +54,8 @@ def session_filters(
     if country:
         query = query.where(HoneypotSession.geo_country == country.upper())
     if ip_address:
-        pattern = f"%{_escape_like(ip_address)}%"
-        query = query.where(HoneypotSession.attacker_ip.ilike(pattern, escape="\\"))
+        pattern = f"%{escape_like(ip_address)}%"
+        query = query.where(HoneypotSession.attacker_ip.ilike(pattern, escape=LIKE_ESCAPE))
     if is_anomalous is not None:
         query = query.where(HoneypotSession.is_anomalous == is_anomalous)
     if exclude_scanners:
@@ -69,11 +65,11 @@ def session_filters(
         scanner_filter = HoneypotSession.scanner_operator.is_(None)
         query = query.where(scanner_filter)
     if search:
-        pattern = f"%{_escape_like(search)}%"
+        pattern = f"%{escape_like(search)}%"
         search_filter = (
-            HoneypotSession.attacker_ip.ilike(pattern, escape="\\")
-            | HoneypotSession.session_uuid.ilike(pattern, escape="\\")
-            | HoneypotSession.command_summary.ilike(pattern, escape="\\")
+            HoneypotSession.attacker_ip.ilike(pattern, escape=LIKE_ESCAPE)
+            | HoneypotSession.session_uuid.ilike(pattern, escape=LIKE_ESCAPE)
+            | HoneypotSession.command_summary.ilike(pattern, escape=LIKE_ESCAPE)
         )
         query = query.where(search_filter)
 
