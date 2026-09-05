@@ -1,374 +1,222 @@
-# HoneySentinel AI — AI-Integrated Honeypot System
+<div align="center">
 
-A full-stack honeypot platform: a set of protocol emulators that capture
-attacker behaviour, an analysis backend that classifies and enriches each
-session, and a dashboard for reviewing what was caught.
+# HoneySentinel AI
 
-**Live demo:** https://honeypot-ui-psi.vercel.app
-**API docs:** https://honeysentinel-api.onrender.com/docs
+### Capture the interaction. Understand the behavior. Follow the evidence.
 
----
+An AI-assisted honeypot platform with protocol emulation, encrypted session evidence,
+and a workspace for investigating suspicious activity.
 
-## Architecture
+**[Quick start](#quick-start) · [Investigation workspace](#investigation-workspace) · [Architecture](#architecture) · [Development](#development) · [Deployment](DEPLOY.md)**
 
-```
-        Attacker
-           │  SSH 2222 / FTP 2121 / HTTP 8080 / HTTPS 8443
-           ▼
-┌──────────────────────────────────────────────┐
-│  Honeypot Engine  (honeypot/)                │
-│  · protocol emulators + session capture      │
-│  · anti-fingerprinting banner rotation       │
-│  · per-IP rate limiting                      │
-│  · control API (token-authenticated)         │
-└───────────────┬──────────────────────────────┘
-                │ POST /sessions/ingest-internal   (X-Honeypot-Token)
-                │ GET  control API                 (X-Honeypot-Token)
-                ▼
-┌──────────────────────────────────────────────┐
-│  Backend API  (backend/)  FastAPI            │
-│  · JWT auth + RBAC (viewer/analyst/admin)    │
-│  · analysis pipeline (see below)             │
-│  · alerting: email + signed webhook          │
-│  · export: JSON / CEF / STIX 2.1             │
-└───────────────┬──────────────────────────────┘
-                │ SQLAlchemy (async)
-                ▼
-        ┌───────────────┐
-        │  PostgreSQL   │
-        └───────────────┘
-                ▲
-                │ REST + JWT
-┌───────────────┴──────────────────────────────┐
-│  Dashboard  (src/)  React 19 + Vite          │
-│  Dashboard │ Live Map │ Sessions │ Settings  │
-└──────────────────────────────────────────────┘
-```
+</div>
 
-The engine sits on an **internal-only** Docker network. Only the backend
-bridges that network and the outside world, so a process that escapes an
-emulator has no route to the internet.
+**[Live demo](https://honeypot-ui-psi.vercel.app) · [API docs](https://honeysentinel-api.onrender.com/docs)**
 
----
+![HoneySentinel investigation workspace with session filters, export controls, and an evidence panel](docs/images/investigation-desktop.png)
 
-## Analysis pipeline
+*Desktop preview using synthetic test data. The screenshot demonstrates the interface, not live threat activity.*
 
-Each ingested session runs through, in order:
+## What you can do
 
-| Stage | Implementation | Output |
-|---|---|---|
-| Geolocation | MaxMind GeoLite2 | country / city / lat / lon, or an explicit "unknown" |
-| Classification | Random Forest over 36 CIC-IDS-style flow features | benign / reconnaissance / exploitation / exfiltration |
-| De-obfuscation | Recursive base64 / hex / escape / URL decoding, depth- and size-bounded | decoded layers, merged into the text everything below matches against |
-| Command NLP | Regex tool + intent signatures, optional spaCy NER | tool names, intents, extracted IPs/URLs |
-| Anomaly detection | Isolation Forest over 11 behavioural features | anomaly score, outlier flag |
-| Attacker profiling | Weighted indicator scorecard | automated bot / script kiddie / skilled / APT |
-| Behavioural clustering | Mini-batch k-means over 10 behavioural features | cluster id, centroid distance, outlier flag |
-| ATT&CK mapping | Tool + intent → technique lookup | tactic IDs and technique objects |
-| Severity | Composite score over the above, then matched against the configured alert thresholds | low / medium / high / critical, and whether to alert |
-
-Sessions from known research scanners (Censys, Shodan, Rapid7, Shadowserver)
-are **attributed, not discarded**. A honeypot on a public address is scanned
-continuously by organisations that are not attacking it, and counting their
-probes as attacks makes every figure incomparable. They are labelled with the
-operator and can be excluded from any view; they are always recorded, because
-a honeypot that silently drops traffic cannot be audited. Point
-`SCANNER_LIST_PATH` at a [MISP warninglist](https://github.com/MISP/misp-warninglists)
-export to replace the built-in seed list.
-
-Raw commands, the command/output transcript, and captured credentials are
-encrypted with AES-256-GCM before they are stored.
-
-A **second stage runs asynchronously**, after the response has been returned.
-If `CHIMERA_URL` points at a local endpoint serving the project's fine-tuned
-model, it reads the stored transcript and returns intent, objectives, ATT&CK
-techniques and indicators, merged onto the session. The split exists because
-NFR-2 budgets 200 ms for classification and a 14B model answers in seconds; a
-slow or absent model degrades the depth of analysis, never the capture.
-
----
-
-## Honest limitations
-
-These matter more than the feature list, so they are stated up front.
-
-**The shipped models are bootstraps, not trained detectors.** If no model
-artefact exists at `MODEL_PATH_RF` / `MODEL_PATH_IF`, both are fitted on
-*synthetic* data generated at build time. Their category labels are
-structurally plausible but their confidence scores are not calibrated against
-real traffic. Every classification response carries
-`model_source: "synthetic"` so this is visible in the API, and the pipeline
-never presents a synthetic verdict as ground truth. To get real numbers,
-train it: `cd backend && python -m ml.train --data /path/to/CIC-IDS2017/`
-writes both the model and a metrics artefact, after which the API reports
-`model_source: "cicids2017"`. See `backend/ml/README.md`, which also documents
-the domain shift between CIC-IDS2017's flow records and the session data this
-system actually captures — a limitation worth reading before quoting any
-figure the trainer produces.
-
-**Nothing has been trained yet, and nothing has captured real traffic yet.**
-The pipeline above is implemented and tested end to end, but no honeypot node
-has run against the internet, so the behavioural clusters are unfitted and no
-session has passed through the second stage. Treat every number the API
-currently returns as structural, not empirical.
-
-**Isolation is verified, not enforced by this code.** The real controls are
-the container runtime's (`cap_drop: ALL`, `read_only`, `no-new-privileges`,
-an `internal` network). `honeypot/security/breakout.py` *checks* those
-controls are actually in place and reports honestly when they are not — it
-does not claim to sandbox itself from inside the sandbox.
-
-**Geolocation requires a MaxMind database.** Without `GEOIP_DB_PATH` pointing
-at a GeoLite2 file, sessions are stored with no location. The map and the
-country filter show fewer events rather than invented ones.
-
-**Rate limiting is per-process and in-memory.** Correct for a single
-instance; running multiple workers needs a shared backend (Redis).
-
-**The SSH disguise is exact for OpenSSH 8.2p1 and nothing else.** Vetterl and
-Clayton ([USENIX WOOT '18](https://www.usenix.org/conference/woot18/presentation/vetterl))
-fingerprint medium-interaction honeypots with a single packet by comparing the
-KEXINIT an off-the-shelf transport library sends against the one the claimed
-software sends. This engine speaks SSH through asyncssh, so the banner and the
-transport proposal are pinned to one profile and match byte for byte — but only
-for 8.2p1, because asyncssh cannot implement `sntrup761x25519-sha512@openssh.com`
-and so cannot imitate 8.9 or later exactly. Imitating a version we can match
-perfectly is the deliberate trade. The disguise is still only transport-deep:
-timing, error-message wording and edge-case command behaviour remain
-fingerprintable.
-
-**The emulated shell has a small, bounded filesystem.** `cd` moves, downloads
-land where they were asked to land, and `chmod +x` then `./payload` behaves —
-enough for a dropper to run its chain to the end. It is not a real filesystem,
-and an attacker who explores beyond the emulated commands will notice.
-
----
-
-## Security model
-
-| Control | Implementation |
+| Workflow | Capabilities |
 |---|---|
-| Password hashing | PBKDF2-HMAC-SHA256, 600 000 iterations, per-user salt |
-| Sessions | JWT access + refresh tokens, with a `typ` claim so the two are not interchangeable |
-| Authorisation | Role hierarchy viewer < analyst < admin, enforced per route |
-| Registration | Always creates a **viewer**; roles are assigned only by an admin |
-| Email OTP | 6 digits from `secrets`, stored as an HMAC digest, 5-attempt limit, 10-minute expiry |
-| Multi-factor auth | TOTP (RFC 6238); enrolment requires a valid code before activation, single-use recovery codes |
-| Database transport | TLS required outside development (`DATABASE_SSL` to override) |
-| Encryption at rest | AES-256-GCM, unique nonce per record, over captured commands, payloads and authenticator secrets |
-| Service-to-service | Shared `HONEYPOT_INGEST_TOKEN`, compared in constant time |
-| Rate limiting | Per-IP via slowapi; 5/min register, 10/min login, 3/min OTP resend |
-| Secrets | The app **refuses to start** in a non-development environment if any secret is still a placeholder |
-| Transport | Security headers on every response; CORS restricted to configured origins |
-| Audit | Every privileged action written to `audit_logs` |
-
----
+| **Capture** | SSH, FTP, HTTP and HTTPS emulators record interactions and attempted credentials. |
+| **Investigate** | Search sessions, filter by protocol and time, inspect transcripts, and review ATT&CK mappings. |
+| **Understand** | Classification, anomaly detection, command analysis, research-scanner attribution, and optional LLM enrichment. |
+| **Respond** | Triage alerts, manage nodes, review indicators, and control the honeypot through role-restricted actions. |
+| **Share** | Copy an investigation link or export matching sessions as CSV, JSON, CEF, or STIX. |
+| **Trace** | Captured evidence is encrypted at rest; privileged operations and evidence access are audit-logged where implemented. |
 
 ## Quick start
+
+For the complete local stack, install **Docker Engine with Compose v2**, **Git**, and **Python 3**.
+Docker builds the application dependencies for you.
 
 ```bash
 git clone https://github.com/mandoof1/honeypot-ui.git
 cd honeypot-ui
-./start.sh          # generates .env with real secrets, then docker compose up
+./start.sh
 ```
 
-| Service | URL |
+The startup script creates `.env` when absent and generates separate signing,
+encryption, and ingest secrets. Compose starts PostgreSQL, the API, frontend, and engine.
+The local Compose configuration enables demo seeding for an empty database.
+
+| Service | Local address |
 |---|---|
 | Dashboard | http://localhost:5173 |
-| API docs | http://localhost:8000/docs |
-| Health | http://localhost:8000/health |
+| Interactive API documentation | http://localhost:8000/docs |
+| API health | http://localhost:8000/health |
+| SSH / FTP emulation | `localhost:2222` / `localhost:2121` |
+| HTTP emulation | http://localhost:8080 |
 
-Emulated services, safe to probe: SSH `localhost:2222`, FTP `localhost:2121`,
-HTTP `localhost:8080`.
-
-Set `SEED_ON_STARTUP=true` to populate an empty database with a demo dataset.
-The generated admin password is printed once to the backend log.
-
-### Without Docker
+Retrieve the generated demo admin credentials from the backend startup log:
 
 ```bash
-# Backend
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
-alembic upgrade head
-uvicorn app.main:app --reload
-
-# Honeypot engine (from the repository root, so `honeypot` is importable)
-pip install -r honeypot/requirements.txt
-python -m honeypot.main
-
-# Frontend
-npm ci && npm run dev
+docker compose logs backend
 ```
 
----
-
-## Tests
+Keep those credentials private. To stop the stack while retaining its named volumes:
 
 ```bash
-cd backend && pytest          # 122 tests
-cd honeypot && pytest         # 50 tests
-npm run lint                  # eslint, zero warnings tolerated
-npm run build                 # production bundle
+./stop.sh
 ```
 
-The backend suite runs against in-memory SQLite and needs no external
-services. `backend/tests/test_regressions.py` holds one test per defect found
-during review, so those bugs cannot silently return.
+**Exposure matters:** Compose publishes the emulated service ports on the host.
+Use an isolated development machine or network and review port bindings before starting.
+HTTPS emulation is supported by the engine but is not enabled in the default protocol list.
 
-The engine suite reads the SSH transport proposal off a real socket rather
-than checking configuration, because what matters is what a scanner sees, and
-walks a full dropper chain — fetch, list, chmod, execute — through the
-emulated shell.
+## Investigation workspace
 
----
+1. **Narrow the activity.** Search an address, session UUID, or command summary. Combine
+   protocol, country, category, status, anomaly, scanner, and date filters.
+2. **Read the evidence.** Select a session to inspect its verdict, tools, transcript, and
+   ATT&CK mappings. Desktop uses a standing detail panel; mobile opens an accessible dialog.
+3. **Share the context.** **Copy link** preserves filters, page, and selected session for
+   another signed-in teammate. Date controls use local time; links use UTC timestamps.
+4. **Export the matches.** Download records across all matching pages, with the same filters
+   applied by the API. Analyst or administrator access is required.
 
-## Configuration
-
-Every setting lives in `.env`; see `.env.example` for the annotated list. The
-ones that matter most:
-
-| Variable | Purpose |
+| Export | Best suited to |
 |---|---|
-| `ENVIRONMENT` | Anything other than `development` enforces real secrets |
-| `SECRET_KEY` | JWT signing key |
-| `ENCRYPTION_KEY` | Key material for encryption at rest |
-| `HONEYPOT_INGEST_TOKEN` | Shared between backend and engine — **must match** |
-| `CORS_ORIGINS` | Comma-separated allowed browser origins |
-| `TRUST_PROXY_HEADERS` | Enable only behind a trusted reverse proxy |
-| `GEOIP_DB_PATH` | MaxMind GeoLite2 database |
-| `SEED_ON_STARTUP` | Load the demo dataset into an empty database |
-| `RUN_MIGRATIONS_ON_STARTUP` | Disable to run `alembic upgrade head` as a release step |
+| CSV | Spreadsheet summaries; formula-like cells are neutralized. |
+| JSON | Structured session reports and analysis. |
+| CEF | SIEM ingestion and event processing. |
+| STIX | Threat-intelligence interchange. |
 
-Generate each secret separately:
+Exports include at most the **newest 5,000 matching sessions**. The UI explicitly reports
+truncation, and the API returns `X-Export-Count` and `X-Export-Truncated` headers.
+Narrow the date window when an export reaches the limit.
 
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
+Searches cancel superseded requests, downloads recover expired access tokens, and
+**Refresh** reloads the current investigation. Research scanners can be excluded from
+views without deleting their recorded activity.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Traffic[Incoming connections] --> Engine[Protocol emulators]
+    Engine -->|Authenticated ingest| API[FastAPI analysis and evidence API]
+    API <--> DB[(PostgreSQL)]
+    UI[React investigation console] <-->|JWT and role checks| API
+    API --> Analysis[Classification / NLP / anomaly detection]
+    API -. Optional asynchronous stage .-> LLM[Local LLM endpoint]
 ```
 
----
-
-## Deployment
-
-| Component | Platform | Notes |
-|---|---|---|
-| Frontend | Vercel | Static build; set `VITE_API_URL` |
-| Backend | Render | `render.yaml` blueprint, includes the database |
-| Database | Render PostgreSQL | Provisioned by the blueprint |
-| Honeypot engine | Your own VPS | See below |
-
-**The engine cannot run on Render's free tier.** Those services expose one
-HTTP port behind a TLS-terminating proxy, so they cannot accept raw SSH or
-FTP connections — the engine would start, bind ports nothing can reach, and
-fail its health check. Run it on a host where you control the network:
-
-Use `deploy/node/`, **not** the compose file at the repository root — the
-root file's honeypot service declares `depends_on: backend`, so running it on
-a node would start a second backend and PostgreSQL alongside the engine.
-
-```bash
-# On the VM
-git clone https://github.com/mandoof1/honeypot-ui.git
-cd honeypot-ui/deploy/node
-sudo bash bootstrap.sh        # moves real SSH to 22022 first, then redirects 22
-cp .env.example .env
-# Set BACKEND_API_URL to your deployed API and copy HONEYPOT_INGEST_TOKEN
-# from the Render dashboard so both sides share the same value.
-docker compose up -d --build
-```
-
-Full walkthrough in [DEPLOY.md](DEPLOY.md).
-
-> **Operating a honeypot is your responsibility.** Only deploy it on
-> infrastructure you own or are authorised to use, keep it isolated from
-> anything you care about, and check your provider's acceptable-use policy —
-> most permit honeypots, some do not.
-
----
-
-## API
-
-Interactive documentation at `/docs`. Authentication is `Authorization:
-Bearer <access_token>`.
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| POST | `/api/v1/auth/register` | — | Register (viewer role, sends OTP) |
-| POST | `/api/v1/auth/verify-otp` | — | Verify email |
-| POST | `/api/v1/auth/login` | — | Obtain a token pair |
-| POST | `/api/v1/auth/refresh` | — | Exchange a refresh token |
-| POST | `/api/v1/auth/request-password-reset` | — | Request a reset code |
-| POST | `/api/v1/auth/reset-password` | — | Complete a reset |
-| GET | `/api/v1/auth/me` | any | Current user |
-| GET | `/api/v1/auth/users` | admin | List users |
-| POST | `/api/v1/auth/users` | admin | Create a user with a role |
-| PATCH | `/api/v1/auth/users/{id}/role` | admin | Change a role |
-| GET | `/api/v1/dashboard/stats` | any | Aggregate statistics |
-| GET | `/api/v1/dashboard/live-events` | any | Recent sessions for the map |
-| GET | `/api/v1/sessions/` | any | List sessions (filter + paginate; `exclude_scanners` hides research scanners) |
-| GET | `/api/v1/sessions/{id}` | any | Session detail |
-| GET | `/api/v1/sessions/{id}/transcript` | any | Commands and what the honeypot appeared to reply |
-| GET | `/api/v1/sessions/{id}/credentials` | admin | Credentials tried — audit-logged on read |
-| POST | `/api/v1/sessions/{id}/export` | analyst | Export one session |
-| POST | `/api/v1/sessions/ingest` | analyst | Manual ingest |
-| POST | `/api/v1/sessions/ingest-internal` | token | Engine ingest |
-| GET | `/api/v1/alerts/` | any | List alerts |
-| GET | `/api/v1/alerts/stats` | any | Alert counts by status/severity |
-| PATCH | `/api/v1/alerts/{id}` | analyst | Triage an alert |
-| GET | `/api/v1/iocs/` | any | Indicators, grouped by value and ranked by how many sessions saw each |
-| GET | `/api/v1/iocs/session/{id}` | any | Indicators from one session |
-| GET | `/api/v1/iocs/feed` | any | Plain-text blocklist, one value per line |
-| GET | `/api/v1/nodes/` | any | List nodes |
-| POST | `/api/v1/nodes/` | admin | Create a node |
-| POST | `/api/v1/nodes/register-internal` | token | Engine self-registration |
-| DELETE | `/api/v1/nodes/{id}` | admin | Delete a node |
-| POST | `/api/v1/export/` | analyst | Bulk export (JSON/CEF/STIX) |
-| GET | `/api/v1/settings/thresholds` | any | Alert thresholds |
-| POST/PATCH/DELETE | `/api/v1/settings/thresholds` | admin | Manage thresholds |
-| GET | `/api/v1/honeypot/status` | any | Live engine status |
-| PATCH | `/api/v1/honeypot/mode` | admin | Switch active/passive |
-| POST | `/api/v1/honeypot/block-ip` | analyst | Block an address |
-
----
-
-## Repository layout
-
-```
-backend/          FastAPI application
-  app/api/        route handlers
-  app/ai/         classifier, de-obfuscation, NLP, clustering, ATT&CK, LLM client
-  app/core/       config, database, security, encryption, TOTP, rate limiting
-  app/services/   analysis pipeline, async enrichment, alerting, email, geoip
-  alembic/        migrations
-  ml/             classifier training + evaluation, cluster fitting
-  tests/          pytest suite
-honeypot/         standalone capture engine (minimal dependencies)
-  emulators/      SSH (real transport), FTP, HTTP/HTTPS
-  core/           config, session manager, response modes, control API, TLS
-  security/       rate limiting, egress filtering, isolation verification
-  adaptive/       banner rotation, actor profiling
-src/              React dashboard
-deploy/node/      standalone engine deployment for a remote VM
-scripts/          GeoLite2 fetch
-```
-
----
-
-## Tech stack
-
-| Layer | Technology |
+| Layer | Stack |
 |---|---|
-| Frontend | React 19, Vite 8, Tailwind CSS 4, React Router 7, Leaflet |
-| Backend | Python 3.12, FastAPI, SQLAlchemy 2 (async), Pydantic v2 |
-| AI/ML | scikit-learn, spaCy, optional local LLM over an OpenAI-compatible endpoint |
-| Database | PostgreSQL 16, Alembic migrations |
-| Auth | JWT (python-jose), PBKDF2-HMAC-SHA256, slowapi |
-| Engine | asyncio — `asyncssh` for the SSH transport, `httpx`, `cryptography` |
+| Console | React 19 · Vite 8 · Tailwind CSS 4 · Leaflet |
+| API | Python 3.12 · FastAPI · SQLAlchemy 2 · Pydantic |
+| Storage | PostgreSQL 16 · Alembic migrations |
+| Analysis | scikit-learn · spaCy · optional local LLM |
+| Engine | asyncio · AsyncSSH · protocol emulators |
 
----
+The engine runs on an internal Docker network with dropped capabilities and a read-only
+root filesystem. Deployment configuration supplies the actual isolation controls;
+the engine's security checks report whether those controls are present.
 
-## License
+## Model and data limitations
 
-MIT
+This is a capstone platform, **not a validated production detection system**.
+
+- Without trained artifacts, the classifier and anomaly detector use synthetic bootstrap
+  models. Confidence scores are not evidence of measured detection accuracy.
+- Geolocation requires a MaxMind database. Missing data stays unknown.
+- Behavioral clustering needs a fitted model; LLM enrichment needs a configured endpoint.
+- In-memory rate limiting applies per process. Multiple workers need a shared limiter.
+- Emulated services remain distinguishable from real systems through some behaviors.
+
+See the [technical reference](docs/TECHNICAL_REFERENCE.md) for the analysis pipeline,
+security model, API routes, and detailed limitations. See [model training](backend/ml/README.md)
+for evaluation and dataset caveats.
+
+## Development
+
+Use **Node.js 24** and **Python 3.12** for the checked development environment.
+
+### Frontend
+
+```bash
+npm ci
+npm run dev
+```
+
+The default API URL is `http://localhost:8000/api/v1`. Set `VITE_API_URL` before building
+when your backend is elsewhere. Frontend-only startup does not create an API or database.
+
+### Backend and tests
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -r backend/requirements-test.txt
+.venv/bin/python -m pytest backend/tests -q
+```
+
+Tests use isolated SQLite and do not require production credentials or a live engine.
+For a manually run backend, configure PostgreSQL and the secrets described in
+[`.env.example`](.env.example), then run migrations and Uvicorn from `backend/`.
+See [deployment instructions](DEPLOY.md) for service configuration.
+
+```bash
+npm run check                   # Lint, API-client tests, production build
+npx playwright install chromium
+npm run test:e2e                 # Desktop/mobile browser tests of the built app
+```
+
+Browser tests use synthetic API fixtures; they do not replace testing a deployed stack.
+Route-level lazy loading keeps the map and other page bundles out of the initial download.
+
+**CI configuration:** [docs/ci.yml.example](docs/ci.yml.example) contains the complete
+GitHub Actions workflow. To activate it, copy it to `.github/workflows/ci.yml` using
+GitHub's editor or a token with `workflow` permission. It is a template here because
+the publishing token does not grant that permission; no CI status is implied.
+
+## Configuration and deployment
+
+Start with [`.env.example`](.env.example). The key settings are:
+
+| Setting | Purpose |
+|---|---|
+| `SECRET_KEY` / `ENCRYPTION_KEY` | Separate signing and encryption secrets. |
+| `HONEYPOT_INGEST_TOKEN` | Matching service credential on API and engine. |
+| `DATABASE_URL` / `DATABASE_URL_SYNC` | Runtime and migration database connections. |
+| `CORS_ORIGINS` | Allowed frontend origins. |
+| `VITE_API_URL` | Frontend API endpoint, including `/api/v1`. |
+| `GEOIP_DB_PATH` | Optional MaxMind database path. |
+| `CHIMERA_URL` | Optional local model endpoint. |
+
+| Guide | Use it for |
+|---|---|
+| [Deployment](DEPLOY.md) | Hosting the console, API, database, and standalone engine. |
+| [Standalone node](deploy/node/) | Running an engine on a separate VM. |
+| [Client integration](CLIENT_INTEGRATION.md) | Connecting components and consuming the API. |
+| [Technical reference](docs/TECHNICAL_REFERENCE.md) | Security controls, API inventory, and analysis internals. |
+
+The standalone engine needs a host that accepts the required raw TCP ports. A web-only
+hosting service is insufficient for SSH and FTP capture.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| “Cannot reach the API” | Backend health, `VITE_API_URL`, and allowed CORS origins. |
+| Startup rejects configuration | Replace placeholder secrets and check database settings. |
+| Empty map | Confirm sessions have coordinates and GeoIP data is installed. |
+| Export controls missing | Viewer accounts cannot export; use an analyst/admin account. |
+| Only some records exported | Check the truncation notice and narrow the filters. |
+| Engine unreachable | Check container health, the control URL, and matching ingest tokens. |
+
+## Team and contributions
+
+This is a collaborative capstone project maintained by
+[mandoof1](https://github.com/mandoof1/honeypot-ui), with development contributions from
+[Adam-ZS](https://github.com/Adam-ZS).
+
+For changes: use a feature branch, describe the behavior before and after, and run the
+checks relevant to the change. Use synthetic fixtures in tests and screenshots.
+Never commit `.env` files, access tokens, or captured credentials.
+
+**Licensing:** the upstream README states MIT, but the repository does not include a
+standalone license file. Confirm the terms with the maintainers before redistribution.

@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, Download, Search, SlidersHorizontal } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, Search, SlidersHorizontal, RefreshCw, Link as LinkIcon } from 'lucide-react'
 import { api } from '../services/api'
 import { useAuth } from '../context/useAuth'
 import { useDebounced } from '../hooks/useDebounced'
 import EmptyState from '../components/EmptyState'
 import ErrorBanner from '../components/ErrorBanner'
 import SessionDetail from '../components/SessionDetail'
+import Dialog from '../components/Dialog'
 import { LoadingRegion } from '../components/Loading'
 
 import {
@@ -14,12 +15,26 @@ import {
   PROFILE_LABEL_SHORT,
 } from '../lib/severity'
 
+function toApiDate(value) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toISOString()
+}
+
+function toLocalDate(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+  return local.toISOString().slice(0, 16)
+}
+
 const PAGE_SIZE = 25
 
 const CATEGORIES = ['benign', 'reconnaissance', 'exploitation', 'exfiltration']
 const STATUSES = ['active', 'completed', 'terminated']
 
 const EXPORT_FORMATS = [
+  { id: 'csv', label: 'CSV', hint: 'Spreadsheet summary of matching sessions' },
   { id: 'json', label: 'JSON', hint: 'Full session records' },
   { id: 'cef', label: 'CEF', hint: 'ArcSight and syslog collectors' },
   { id: 'stix', label: 'STIX', hint: 'Threat intelligence platforms' },
@@ -30,6 +45,9 @@ const EMPTY_FILTERS = {
   status: '',
   attack_category: '',
   country: '',
+  protocol: '',
+  date_from: '',
+  date_to: '',
   is_anomalous: '',
   // Off by default: hiding traffic silently would misrepresent what the
   // honeypot saw. It is offered because scanner probes otherwise dominate
@@ -104,20 +122,33 @@ export default function SessionLogs() {
   const { hasRole } = useAuth()
   const [sessions, setSessions] = useState([])
   const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [exporting, setExporting] = useState(null)
   const [selected, setSelected] = useState(null)
-  const [showFilters, setShowFilters] = useState(false)
-  const [filters, setFilters] = useState(EMPTY_FILTERS)
-  const [searchParams] = useSearchParams()
+  const [detailError, setDetailError] = useState(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  // Selection is URL state, but must not change the list request's identity.
+  const filterKey = JSON.stringify(Object.fromEntries(
+    Object.keys(EMPTY_FILTERS).map((key) => [key, searchParams.get(key) || '']),
+  ))
+  const filters = useMemo(() => JSON.parse(filterKey), [filterKey])
+  const requested = Number(searchParams.get('session')) || null
+  const page = Math.max(1, Math.min(1000000, Math.floor(Number(searchParams.get('page'))) || 1))
+  const [showFilters, setShowFilters] = useState(() => [...searchParams.keys()].some((key) => key in EMPTY_FILTERS && key !== 'search'))
+  const [mobileOpen, setMobileOpen] = useState(() => Boolean(searchParams.get('session')) && window.matchMedia('(max-width: 1023px)').matches)
+  const [notice, setNotice] = useState('')
+  const activeRequest = useRef(null)
+  const [reload, setReload] = useState(0)
 
   const debouncedSearch = useDebounced(filters.search)
   const canExport = hasRole('analyst')
 
   const query = useMemo(
-    () => ({ ...filters, search: debouncedSearch }),
+    () => ({ ...filters, search: debouncedSearch,
+      date_from: filters.date_from ? toApiDate(filters.date_from) : '',
+      date_to: filters.date_to ? toApiDate(filters.date_to) : '',
+    }),
     [filters, debouncedSearch],
   )
 
@@ -127,58 +158,95 @@ export default function SessionLogs() {
     [filters],
   )
 
-  const fetchSessions = useCallback(async () => {
-    try {
-      setLoading(true)
-      const data = await api.sessions.list({ page, page_size: PAGE_SIZE, ...query })
-      const rows = data.sessions || []
-      setSessions(rows)
-      setTotal(data.total || 0)
-      // Open on the first result rather than an empty detail pane, so the
-      // page shows what it does before anything is clicked. Only when the
-      // current selection is gone, so paging does not steal focus.
-      //
-      // A ?session= parameter wins over both: it is how an alert links to the
-      // session that caused it, and arriving on the wrong row would make that
-      // link pointless. Fetched directly, because the session may not be on
-      // the page the list happens to be showing.
-      const requested = Number(searchParams.get('session'))
-      if (requested) {
-        const known = rows.find((r) => r.id === requested)
-        setSelected(known ?? (await api.sessions.get(requested).catch(() => null)))
-      } else {
-        setSelected((current) =>
-          current && rows.some((r) => r.id === current.id) ? current : rows[0] ?? null,
-        )
-      }
-      setError(null)
-    } catch (err) {
-      setError(err.message)
-      setSessions([])
-      setTotal(0)
-    } finally {
-      setLoading(false)
-    }
-  }, [page, query, searchParams])
+  const fetchSessions = useCallback(() => setReload((value) => value + 1), [])
 
   useEffect(() => {
-    const timer = setTimeout(fetchSessions, 0)
-    return () => clearTimeout(timer)
-  }, [fetchSessions])
+    const controller = new AbortController()
+    activeRequest.current = controller
+    const options = { signal: controller.signal }
+    const load = async () => {
+      setLoading(true)
+      try {
+        const data = await api.sessions.list({ page, page_size: PAGE_SIZE, ...query }, options)
+        if (controller.signal.aborted) return
+        const rows = data.sessions || []
+        setSessions(rows)
+        setTotal(data.total || 0)
+        setError(null)
+      } catch (err) {
+        if (controller.signal.aborted) return
+        setError(err.message)
+        setSessions([])
+        setSelected(null)
+        setTotal(0)
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
+      }
+    }
+    const timer = setTimeout(load, 0)
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [page, query, reload])
+
+  // Missing or slow deep-link details must not hide a successful list result.
+  useEffect(() => {
+    if (loading) return
+    const controller = new AbortController()
+    const loadDetail = async () => {
+      setDetailError(null)
+      const row = sessions.find((item) => item.id === requested)
+      if (!requested || row) {
+        setSelected(row || sessions[0] || null)
+        return
+      }
+      setSelected(null)
+      try {
+        const detail = await api.sessions.get(requested, { signal: controller.signal })
+        if (!controller.signal.aborted) setSelected(detail)
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setDetailError(`Unable to open the linked session: ${err.message}. You can still browse the matching sessions.`)
+        }
+      }
+    }
+    const timer = setTimeout(loadDetail, 0)
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [requested, sessions, loading])
+
+  useEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1024px)')
+    const closeOnDesktop = () => { if (desktop.matches) setMobileOpen(false) }
+    desktop.addEventListener('change', closeOnDesktop)
+    return () => desktop.removeEventListener('change', closeOnDesktop)
+  }, [])
+
+  const changeParams = (changes, replace = false) => {
+    if (Object.keys(changes).some((key) => key !== 'session')) activeRequest.current?.abort()
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      Object.entries(changes).forEach(([key, value]) => {
+        if (value === '' || value == null) next.delete(key)
+        else next.set(key, value)
+      })
+      return next
+    }, { replace })
+  }
+  const selectSession = (session) => {
+    setSelected(session)
+    setMobileOpen(window.matchMedia('(max-width: 1023px)').matches)
+    changeParams({ session: session.id }, true)
+  }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
-  const updateFilter = (key, value) => {
-    // Reset to the first page here rather than in an effect: a filter change
-    // invalidates the current page, and doing it in the same event avoids a
-    // render pass that would fetch page N of the new result set.
-    setPage(1)
-    setFilters((current) => ({ ...current, [key]: value }))
-  }
-
-  const clearFilters = () => {
-    setPage(1)
-    setFilters((current) => ({ ...EMPTY_FILTERS, search: current.search }))
+  const updateFilter = (key, value) => changeParams({ [key]: key.startsWith('date_') && value ? toApiDate(value) : value, page: '', session: '' }, key === 'search')
+  const clearFilters = () => changeParams({ ...EMPTY_FILTERS, page: '', session: '' })
+  const shareView = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href)
+      setNotice('Investigation link copied. Teammates must sign in to view it.')
+    } catch {
+      setNotice('Copy the address from your browser to share this investigation.')
+    }
   }
 
   const handleExport = async (format) => {
@@ -187,7 +255,7 @@ export default function SessionLogs() {
       // The API returns the real file with its own Content-Disposition name;
       // an earlier version re-encoded every format as JSON and always saved
       // it with a .json extension.
-      const { blob, filename } = await api.export.sessions({ format })
+      const { blob, filename, count, truncated } = await api.export.sessions({ ...query, format })
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
@@ -195,7 +263,9 @@ export default function SessionLogs() {
       document.body.appendChild(link)
       link.click()
       link.remove()
-      URL.revokeObjectURL(url)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      const matches = `${count.toLocaleString()} matching session${count === 1 ? '' : 's'}`
+      setNotice(truncated ? `Exported the newest ${matches}. Narrow the filters to include the remaining records.` : `Exported ${matches}.`)
       setError(null)
     } catch (err) {
       setError(`Export failed: ${err.message}`)
@@ -205,12 +275,25 @@ export default function SessionLogs() {
   }
 
   return (
-    <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-3">
+    <div className="mx-auto flex min-h-full max-w-[1600px] lg:h-full flex-col gap-3">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="eyebrow mb-1">Investigation workspace</p>
+          <h1 className="text-2xl">Sessions</h1>
+          <p className="mt-1 text-sm text-paper-2">Explore captured activity, inspect evidence, and share your findings.</p>
+        </div>
+        <div className="flex gap-2">
+          <button className="control" onClick={shareView}><LinkIcon className="h-3.5 w-3.5" />Copy link</button>
+          <button className="control" onClick={fetchSessions} disabled={loading}><RefreshCw className="h-3.5 w-3.5" />Refresh</button>
+        </div>
+      </header>
+      {notice && <div role="status" className="panel flex items-center justify-between gap-3 p-3 text-sm text-paper-2">{notice}<button className="control" onClick={() => setNotice('')} aria-label="Dismiss notification">Dismiss</button></div>}
       {error && <ErrorBanner message={error} onRetry={fetchSessions} />}
+      {detailError && <div role="status" className="panel p-3 text-sm text-paper-2">{detailError}</div>}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <div className="relative">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="relative min-w-0">
             <Search
               className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-paper-3"
               strokeWidth={1.75}
@@ -243,12 +326,12 @@ export default function SessionLogs() {
 
         {canExport && (
           <div className="flex items-center gap-1.5">
-            <span className="mr-1 hidden text-[12px] text-paper-3 sm:inline">Export</span>
+            <span className="mr-1 hidden text-[12px] text-paper-3 sm:inline">Export matches</span>
             {EXPORT_FORMATS.map(({ id, label, hint }) => (
               <button
                 key={id}
                 type="button"
-                disabled={exporting !== null}
+                disabled={exporting !== null || loading || total === 0}
                 onClick={() => handleExport(id)}
                 title={hint}
                 className="control"
@@ -263,6 +346,17 @@ export default function SessionLogs() {
 
       {showFilters && (
         <div className="panel flex flex-wrap items-end gap-3 p-3">
+          <label className="flex flex-col gap-1">
+            <span className="eyebrow">Protocol</span>
+            <select className="control" value={filters.protocol} onChange={(e) => updateFilter('protocol', e.target.value)}>
+              <option value="">All protocols</option>
+              {['ssh', 'ftp', 'http', 'https'].map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+            </select>
+          </label>
+          {['date_from', 'date_to'].map((key) => <label key={key} className="flex flex-col gap-1">
+            <span className="eyebrow">{key === 'date_from' ? 'From' : 'Until'} (local time)</span>
+            <input type="datetime-local" className="field" value={toLocalDate(filters[key])} onChange={(e) => updateFilter(key, e.target.value)} />
+          </label>)}
           <label className="flex flex-col gap-1">
             <span className="eyebrow">Status</span>
             <select
@@ -337,12 +431,21 @@ export default function SessionLogs() {
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-2 text-xs text-paper-2" aria-live="polite">
+        <span className="readout">{loading ? 'Searching…' : `${total.toLocaleString()} matching session${total === 1 ? '' : 's'}`}</span>
+        {Object.entries(filters).filter(([, value]) => value).map(([key, value]) => (
+          <button key={key} className="control text-xs" onClick={() => updateFilter(key, '')} aria-label={`Remove ${key.replaceAll('_', ' ')} filter`}>
+            {key.replaceAll('_', ' ')}: {value} ×
+          </button>
+        ))}
+        {Object.values(filters).some(Boolean) && <button className="control" onClick={clearFilters}>Reset all</button>}
+      </div>
       {/*
         Master–detail rather than a modal: an analyst comparing sessions can
         step down the list and watch the right-hand panel change, instead of
         opening and dismissing a dialog for each one.
       */}
-      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+      <div className="grid min-h-[24rem] flex-1 gap-3 lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
         <section className="panel flex min-h-0 flex-col overflow-hidden">
           {loading ? (
             <LoadingRegion label="Loading sessions" />
@@ -362,7 +465,7 @@ export default function SessionLogs() {
                   key={session.id}
                   session={session}
                   selected={selected?.id === session.id}
-                  onSelect={setSelected}
+                  onSelect={selectSession}
                 />
               ))}
             </ul>
@@ -377,7 +480,7 @@ export default function SessionLogs() {
               <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  onClick={() => changeParams({ page: Math.max(1, page - 1), session: '' })}
                   disabled={page === 1}
                   aria-label="Previous page"
                   className="control px-1.5"
@@ -389,7 +492,7 @@ export default function SessionLogs() {
                 </span>
                 <button
                   type="button"
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  onClick={() => changeParams({ page: Math.min(totalPages, page + 1), session: '' })}
                   disabled={page >= totalPages}
                   aria-label="Next page"
                   className="control px-1.5"
@@ -407,25 +510,12 @@ export default function SessionLogs() {
           <SessionDetail session={selected} />
         </aside>
 
-        {selected && (
-          <div
-            className="fixed inset-0 z-50 flex items-end bg-ink-0/85 lg:hidden"
-            onClick={() => setSelected(null)}
-            role="presentation"
-          >
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-label={`Session ${selected.session_uuid}`}
-              className="panel max-h-[85vh] w-full overflow-hidden rounded-b-none"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <SessionDetail session={selected} onClose={() => setSelected(null)} />
-            </div>
-          </div>
+        {selected && mobileOpen && (
+          <Dialog label={`Session ${selected.session_uuid}`} onClose={() => setMobileOpen(false)} className="lg:hidden">
+            <SessionDetail session={selected} onClose={() => setMobileOpen(false)} />
+          </Dialog>
         )}
       </div>
     </div>
   )
 }
-

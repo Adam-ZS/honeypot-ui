@@ -369,19 +369,6 @@ class SessionListResponse(BaseModel):
     page_size: int
 
 
-class SessionFilter(BaseModel):
-    status: Optional[SessionStatus] = None
-    attack_category: Optional[AttackCategory] = None
-    attacker_profile: Optional[AttackerProfile] = None
-    severity: Optional[AttackSeverity] = None
-    country: Optional[str] = None
-    ip_address: Optional[str] = None
-    date_from: Optional[datetime] = None
-    date_to: Optional[datetime] = None
-    is_anomalous: Optional[bool] = None
-    search: Optional[str] = None
-
-
 class AlertResponse(BaseModel):
     id: int
     session_id: int

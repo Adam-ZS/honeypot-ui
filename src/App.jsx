@@ -1,17 +1,20 @@
+import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider } from './context/AuthContext'
 import { useAuth } from './context/useAuth'
+import ErrorBoundary from './components/ErrorBoundary'
 import { Spinner } from './components/Loading'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import ForgotPassword from './pages/ForgotPassword'
 import DashboardLayout from './layouts/DashboardLayout'
-import Dashboard from './pages/Dashboard'
-import LiveMap from './pages/LiveMap'
-import SessionLogs from './pages/SessionLogs'
-import Alerts from './pages/Alerts'
-import Indicators from './pages/Indicators'
-import Settings from './pages/Settings'
+
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const LiveMap = lazy(() => import('./pages/LiveMap'))
+const SessionLogs = lazy(() => import('./pages/SessionLogs'))
+const Alerts = lazy(() => import('./pages/Alerts'))
+const Indicators = lazy(() => import('./pages/Indicators'))
+const Settings = lazy(() => import('./pages/Settings'))
 
 function AuthRoutes() {
   const { user, loading } = useAuth()
@@ -53,7 +56,9 @@ function AuthRoutes() {
 export default function App() {
   return (
     <AuthProvider>
-      <AuthRoutes />
+      <ErrorBoundary>
+        <Suspense fallback={<Spinner label="Loading view" />}><AuthRoutes /></Suspense>
+      </ErrorBoundary>
     </AuthProvider>
   )
 }

@@ -45,7 +45,7 @@ ATTACK_TYPES = [
     ("SSH Brute Force", AttackCategory.EXPLOITATION, ["hydra", "medusa"], ["credential_harvesting"]),
     ("SQL Injection", AttackCategory.EXPLOITATION, ["sqlmap", "burpsuite"], ["privilege_escalation"]),
     ("Port Scan (SYN)", AttackCategory.RECONNAISSANCE, ["nmap", "masscan"], ["reconnaissance"]),
-    ("RDP Exploitation", AttackCategory.EXPLOITATION, ["metasploit"], ["privilege_escalation", "lateral_movement"]),
+    ("HTTP Exploitation", AttackCategory.EXPLOITATION, ["metasploit"], ["privilege_escalation"]),
     ("XSS Attempt", AttackCategory.EXPLOITATION, ["burpsuite"], ["exploitation"]),
     ("Command Injection", AttackCategory.EXPLOITATION, ["netcat", "metasploit"], ["privilege_escalation"]),
     ("Directory Traversal", AttackCategory.RECONNAISSANCE, ["gobuster", "nikto"], ["reconnaissance"]),
@@ -72,11 +72,21 @@ TOOLS_DB = {
     "wget_curl": {"category": "file_download"},
 }
 
+# Synthetic scenarios use transports actually supported by the engine.
+ATTACK_PROTOCOLS = {
+    "SSH Brute Force": "ssh", "SQL Injection": "https",
+    "Port Scan (SYN)": "ssh", "HTTP Exploitation": "http",
+    "XSS Attempt": "https", "Command Injection": "http",
+    "Directory Traversal": "http", "Malware Beacon": "https",
+    "FTP Brute Force": "ftp", "HTTP Scanner": "http",
+    "Reverse Shell Attempt": "ssh", "Data Exfiltration": "ftp",
+}
+
 MITRE_TECHNIQUES = {
     "SSH Brute Force": [{"id": "T1110.001", "name": "Password Guessing"}],
     "SQL Injection": [{"id": "T1190", "name": "Exploit Public-Facing Application"}],
     "Port Scan (SYN)": [{"id": "T1046", "name": "Network Service Discovery"}],
-    "RDP Exploitation": [{"id": "T1190", "name": "Exploit Public-Facing Application"}, {"id": "T1021.001", "name": "Remote Desktop Protocol"}],
+    "HTTP Exploitation": [{"id": "T1190", "name": "Exploit Public-Facing Application"}],
     "XSS Attempt": [{"id": "T1190", "name": "Exploit Public-Facing Application"}],
     "Command Injection": [{"id": "T1059", "name": "Command and Scripting Interpreter"}],
     "Directory Traversal": [{"id": "T1083", "name": "File and Directory Discovery"}],
@@ -168,7 +178,8 @@ async def seed_database():
         sessions_data = []
         for i in range(SESSION_COUNT):
             ip_info = random.choice(ATTACKER_IPS)
-            attack = random.choice(ATTACK_TYPES)
+            # Cover every scenario and protocol even in a small demo dataset.
+            attack = ATTACK_TYPES[i % len(ATTACK_TYPES)]
             node = random.choice(nodes)
             time_offset = timedelta(hours=random.randint(0, 72), minutes=random.randint(0, 59))
             started_at = now - time_offset
@@ -199,6 +210,7 @@ async def seed_database():
             status = random.choice([SessionStatus.COMPLETED, SessionStatus.COMPLETED, SessionStatus.COMPLETED, SessionStatus.ACTIVE])
 
             session = HoneypotSession(
+                protocol=ATTACK_PROTOCOLS[attack[0]],
                 attacker_ip=ip_info[0],
                 attacker_port=random.randint(1024, 65535),
                 node_id=node.id,

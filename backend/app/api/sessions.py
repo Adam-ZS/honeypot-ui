@@ -4,47 +4,25 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
-from typing import Optional
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_role, verify_honeypot_token
-from app.models import HoneypotSession, HoneypotNode, AuditLog, SessionStatus, AttackCategory, AttackerProfile
+from app.models import HoneypotSession, HoneypotNode, AuditLog
 from app.core.encryption import decrypt_data
 from app.schemas import (
     HoneypotSessionResponse,
     SessionListResponse,
-    SessionFilter,
     SessionTranscriptResponse,
     SessionCredentialsResponse,
     TranscriptEntry,
     CapturedCredential,
 )
 from app.api.export import FILE_EXTENSIONS, MEDIA_TYPES, _render
+from app.services.session_filters import session_filters
 from app.services.analysis import analysis_pipeline
 from app.services import enrichment
 
 router = APIRouter()
-
-
-def _escape_like(value: str) -> str:
-    """Neutralise LIKE wildcards in user-supplied search text."""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _parse_enum(enum_cls, value: str, field: str):
-    """Map a query-string value onto an enum, or raise 400.
-
-    Passing the raw value to the enum constructor made an unknown filter
-    value raise ValueError, which surfaced to the client as a 500.
-    """
-    try:
-        return enum_cls(value)
-    except ValueError:
-        allowed = ", ".join(member.value for member in enum_cls)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid {field} {value!r}. Expected one of: {allowed}",
-        )
 
 
 @router.post("/ingest-internal", dependencies=[Depends(verify_honeypot_token)])
@@ -86,73 +64,20 @@ async def ingest_session_from_honeypot(
 async def list_sessions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[str] = None,
-    attack_category: Optional[str] = None,
-    attacker_profile: Optional[str] = None,
-    country: Optional[str] = None,
-    ip_address: Optional[str] = None,
-    is_anomalous: Optional[bool] = None,
-    exclude_scanners: bool = Query(
-        False,
-        description="Hide sessions from known research scanners (Censys, "
-                    "Shodan, Shadowserver). They are recorded either way; this "
-                    "excludes them from the view.",
-    ),
-    search: Optional[str] = None,
+    filters=Depends(session_filters),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     query = select(HoneypotSession)
     count_query = select(func.count(HoneypotSession.id))
 
-    if status:
-        parsed = _parse_enum(SessionStatus, status, "status")
-        query = query.where(HoneypotSession.status == parsed)
-        count_query = count_query.where(HoneypotSession.status == parsed)
-    if attack_category:
-        parsed = _parse_enum(AttackCategory, attack_category, "attack_category")
-        query = query.where(HoneypotSession.attack_category == parsed)
-        count_query = count_query.where(HoneypotSession.attack_category == parsed)
-    if attacker_profile:
-        parsed = _parse_enum(
-            AttackerProfile, attacker_profile, "attacker_profile"
-        )
-        query = query.where(HoneypotSession.attacker_profile == parsed)
-        count_query = count_query.where(
-            HoneypotSession.attacker_profile == parsed
-        )
-    if country:
-        query = query.where(HoneypotSession.geo_country == country.upper())
-        count_query = count_query.where(HoneypotSession.geo_country == country.upper())
-    if ip_address:
-        pattern = f"%{_escape_like(ip_address)}%"
-        query = query.where(HoneypotSession.attacker_ip.ilike(pattern, escape="\\"))
-        count_query = count_query.where(
-            HoneypotSession.attacker_ip.ilike(pattern, escape="\\")
-        )
-    if is_anomalous is not None:
-        query = query.where(HoneypotSession.is_anomalous == is_anomalous)
-        count_query = count_query.where(HoneypotSession.is_anomalous == is_anomalous)
-    if exclude_scanners:
-        # A honeypot on a public address is scanned continuously by
-        # organisations that are not attacking it; counting their probes as
-        # attacks makes every figure incomparable.
-        scanner_filter = HoneypotSession.scanner_operator.is_(None)
-        query = query.where(scanner_filter)
-        count_query = count_query.where(scanner_filter)
-    if search:
-        pattern = f"%{_escape_like(search)}%"
-        search_filter = (
-            HoneypotSession.attacker_ip.ilike(pattern, escape="\\")
-            | HoneypotSession.session_uuid.ilike(pattern, escape="\\")
-            | HoneypotSession.command_summary.ilike(pattern, escape="\\")
-        )
-        query = query.where(search_filter)
-        count_query = count_query.where(search_filter)
+    if filters is not None:
+        query = query.where(filters)
+        count_query = count_query.where(filters)
 
     total = (await db.execute(count_query)).scalar() or 0
 
-    query = query.order_by(desc(HoneypotSession.started_at)).offset((page - 1) * page_size).limit(page_size)
+    query = query.order_by(desc(HoneypotSession.started_at), desc(HoneypotSession.id)).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     sessions = result.scalars().all()
 

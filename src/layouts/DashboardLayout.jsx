@@ -1,7 +1,9 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { Bell, ChevronUp, LogOut, Menu, X } from 'lucide-react'
 import { useAuth } from '../context/useAuth'
+import ErrorBoundary from '../components/ErrorBoundary'
+import { LoadingRegion } from '../components/Loading'
 import { api } from '../services/api'
 
 const NAV = [
@@ -115,14 +117,15 @@ export default function DashboardLayout() {
   }, [])
 
   useEffect(() => {
-    if (!accountOpen) return undefined
-    const onKey = (e) => { if (e.key === 'Escape') setAccountOpen(false) }
+    if (!accountOpen && !railOpen) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') { setAccountOpen(false); setRailOpen(false) } }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [accountOpen])
+  }, [accountOpen, railOpen])
 
   return (
-    <div className="flex h-screen overflow-hidden bg-ink-0">
+    <div className="flex h-dvh overflow-hidden bg-ink-0">
+      <a href="#main-content" className="skip-link">Skip to content</a>
       {railOpen && (
         <div
           className="fixed inset-0 z-20 bg-ink-0/85 lg:hidden"
@@ -138,7 +141,7 @@ export default function DashboardLayout() {
       */}
       <aside
         className={`fixed inset-y-0 left-0 z-30 flex w-52 flex-col border-r border-line bg-ink-1 transition-transform duration-200 lg:static lg:translate-x-0 ${
-          railOpen ? 'translate-x-0' : '-translate-x-full'
+          railOpen ? 'visible translate-x-0' : 'invisible -translate-x-full lg:visible'
         }`}
       >
         <div className="flex items-center gap-2 px-4 pb-3 pt-4">
@@ -156,7 +159,7 @@ export default function DashboardLayout() {
           </button>
         </div>
 
-        <nav className="flex-1 overflow-y-auto px-2 py-2">
+        <nav aria-label="Main navigation" className="flex-1 overflow-y-auto px-2 py-2">
           {NAV.map(({ to, label }) => (
             <NavLink
               key={to}
@@ -184,7 +187,7 @@ export default function DashboardLayout() {
                     aria-hidden="true"
                   />
                   {label}
-                  {to === '/sessions' && newAlerts > 0 && (
+                  {to === '/alerts' && newAlerts > 0 && (
                     <span className="readout ml-2 align-middle text-[11px] text-s4">
                       {newAlerts > 99 ? '99+' : newAlerts}
                     </span>
@@ -262,15 +265,20 @@ export default function DashboardLayout() {
           onClick={() => setRailOpen(true)}
           className="control absolute left-3 top-3 z-10 lg:hidden"
           aria-label="Open menu"
+          aria-expanded={railOpen}
         >
           <Menu className="h-4 w-4" />
         </button>
 
         <main
+          id="main-content"
+          tabIndex={-1}
           key={location.pathname}
           className="flex-1 overflow-y-auto px-4 pb-6 pt-14 lg:px-6 lg:pt-6"
         >
-          <Outlet />
+          <ErrorBoundary key={location.pathname}>
+            <Suspense fallback={<LoadingRegion label="Loading view" />}><Outlet /></Suspense>
+          </ErrorBoundary>
         </main>
       </div>
     </div>
