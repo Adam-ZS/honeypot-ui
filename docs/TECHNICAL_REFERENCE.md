@@ -99,10 +99,11 @@ the domain shift between CIC-IDS2017's flow records and the session data this
 system actually captures — a limitation worth reading before quoting any
 figure the trainer produces.
 
-**This repository does not establish live deployment or model-validation results.**
-The pipeline has automated tests, but these do not establish detection accuracy
-on real internet traffic. Verify the deployed model artifacts, training metrics,
-and capture history before treating a deployment as empirically validated.
+**Nothing has been trained yet, and nothing has captured real traffic yet.**
+The pipeline above is implemented and tested end to end, but no honeypot node
+has run against the internet, so the behavioural clusters are unfitted and no
+session has passed through the second stage. Treat every number the API
+currently returns as structural, not empirical.
 
 **Isolation is verified, not enforced by this code.** The real controls are
 the container runtime's (`cap_drop: ALL`, `read_only`, `no-new-privileges`,
@@ -264,6 +265,5 @@ scripts/          GeoLite2 fetch
 
 ## License
 
-The upstream README states MIT; a standalone license file has not been included.
-Confirm licensing with the maintainers before redistributing the project.
+MIT — see [LICENSE](../LICENSE).
 

@@ -218,5 +218,6 @@ For changes: use a feature branch, describe the behavior before and after, and r
 checks relevant to the change. Use synthetic fixtures in tests and screenshots.
 Never commit `.env` files, access tokens, or captured credentials.
 
-**Licensing:** the upstream README states MIT, but the repository does not include a
-standalone license file. Confirm the terms with the maintainers before redistribution.
+## License
+
+MIT — see [LICENSE](LICENSE).
