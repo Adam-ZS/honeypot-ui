@@ -262,6 +262,7 @@ class NetworkEvent(BaseModel):
 class HoneypotSessionResponse(BaseModel):
     id: int
     session_uuid: str
+    capture_dropped: Dict[str, int] = Field(default_factory=dict)
     node_id: int
     protocol: Optional[str] = None
     attacker_ip: str
@@ -313,6 +314,7 @@ class HoneypotSessionResponse(BaseModel):
         return cls(
             id=obj.id,
             session_uuid=obj.session_uuid,
+            capture_dropped=obj.capture_dropped or {},
             node_id=obj.node_id,
             protocol=obj.protocol,
             attacker_ip=obj.attacker_ip,
@@ -369,17 +371,25 @@ class SessionListResponse(BaseModel):
     page_size: int
 
 
-class SessionFilter(BaseModel):
-    status: Optional[SessionStatus] = None
-    attack_category: Optional[AttackCategory] = None
-    attacker_profile: Optional[AttackerProfile] = None
-    severity: Optional[AttackSeverity] = None
-    country: Optional[str] = None
-    ip_address: Optional[str] = None
-    date_from: Optional[datetime] = None
-    date_to: Optional[datetime] = None
-    is_anomalous: Optional[bool] = None
-    search: Optional[str] = None
+class SharedIndicator(BaseModel):
+    type: str
+    value: str
+
+
+class RelatedSession(BaseModel):
+    session: HoneypotSessionResponse
+    same_source_ip: bool
+    shared_indicators: List[SharedIndicator]
+    shared_indicator_count: int
+
+
+class RelatedActivityResponse(BaseModel):
+    session_id: int
+    window_start: datetime
+    window_end: datetime
+    truncated: bool
+    indicators_truncated: bool
+    matches: List[RelatedSession]
 
 
 class AlertResponse(BaseModel):

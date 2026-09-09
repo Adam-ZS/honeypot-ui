@@ -11,10 +11,7 @@ and a workspace for investigating suspicious activity.
 
 </div>
 
-> **Capstone project · Adam-ZS's development fork**
-> Built collaboratively from [mandoof1/honeypot-ui](https://github.com/mandoof1/honeypot-ui).
-> This fork includes the investigation, export, reliability, and documentation improvements
-> submitted upstream in [pull request #1](https://github.com/mandoof1/honeypot-ui/pull/1).
+**[Live demo](https://honeypot-ui-psi.vercel.app) · [API docs](https://honeysentinel-api.onrender.com/docs)**
 
 ![HoneySentinel investigation workspace with session filters, export controls, and an evidence panel](docs/images/investigation-desktop.png)
 
@@ -26,10 +23,12 @@ and a workspace for investigating suspicious activity.
 |---|---|
 | **Capture** | SSH, FTP, HTTP and HTTPS emulators record interactions and attempted credentials. |
 | **Investigate** | Search sessions, filter by protocol and time, inspect transcripts, and review ATT&CK mappings. |
+| **Connect** | Find related sessions through shared source IPs, URLs, domains and file hashes, with a reason for each match. |
+| **Recover** | Queue completed captures across API outages and restarts, retry without duplicate sessions, and monitor delivery health. |
 | **Understand** | Classification, anomaly detection, command analysis, research-scanner attribution, and optional LLM enrichment. |
 | **Respond** | Triage alerts, manage nodes, review indicators, and control the honeypot through role-restricted actions. |
 | **Share** | Copy an investigation link or export matching sessions as CSV, JSON, CEF, or STIX. |
-| **Trace** | Captured evidence is encrypted at rest; privileged operations and evidence access are audit-logged where implemented. |
+| **Trace** | Backend commands, transcripts and credentials are encrypted at rest; privileged operations and evidence access are audit-logged where implemented. Engine capture files require protected storage. |
 
 ## Quick start
 
@@ -37,7 +36,7 @@ For the complete local stack, install **Docker Engine with Compose v2**, **Git**
 Docker builds the application dependencies for you.
 
 ```bash
-git clone https://github.com/Adam-ZS/honeypot-ui.git
+git clone https://github.com/mandoof1/honeypot-ui.git
 cd honeypot-ui
 ./start.sh
 ```
@@ -98,6 +97,10 @@ views without deleting their recorded activity.
 
 ## Architecture
 
+**Related activity and delivery recovery:** see the [feature and operations guide](docs/CAPTURE_AND_CORRELATION.md)
+for evidence matching, capture limits, queue monitoring and upgrade order.
+The session detail panel reports omitted evidence when capture limits are reached.
+
 ```mermaid
 flowchart LR
     Traffic[Incoming connections] --> Engine[Protocol emulators]
@@ -153,8 +156,9 @@ when your backend is elsewhere. Frontend-only startup does not create an API or 
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -r backend/requirements-test.txt
+.venv/bin/pip install -r backend/requirements-test.txt -r honeypot/requirements.txt
 .venv/bin/python -m pytest backend/tests -q
+.venv/bin/python -m pytest honeypot/tests -q
 ```
 
 Tests use isolated SQLite and do not require production credentials or a live engine.
@@ -211,15 +215,12 @@ hosting service is insufficient for SSH and FTP capture.
 | Only some records exported | Check the truncation notice and narrow the filters. |
 | Engine unreachable | Check container health, the control URL, and matching ingest tokens. |
 
-## Team and contributions
-
-This is a collaborative capstone project maintained upstream by
-[mandoof1](https://github.com/mandoof1/honeypot-ui), with development contributions from
-[Adam-ZS](https://github.com/Adam-ZS). The fork preserves the upstream history.
+## Contributing
 
 For changes: use a feature branch, describe the behavior before and after, and run the
 checks relevant to the change. Use synthetic fixtures in tests and screenshots.
 Never commit `.env` files, access tokens, or captured credentials.
 
-**Licensing:** the upstream README states MIT, but the repository does not include a
-standalone license file. Confirm the terms with the maintainers before redistribution.
+## License
+
+MIT — see [LICENSE](LICENSE).

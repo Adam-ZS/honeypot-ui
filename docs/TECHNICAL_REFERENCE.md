@@ -99,10 +99,11 @@ the domain shift between CIC-IDS2017's flow records and the session data this
 system actually captures — a limitation worth reading before quoting any
 figure the trainer produces.
 
-**This repository does not establish live deployment or model-validation results.**
-The pipeline has automated tests, but these do not establish detection accuracy
-on real internet traffic. Verify the deployed model artifacts, training metrics,
-and capture history before treating a deployment as empirically validated.
+**Nothing has been trained yet, and nothing has captured real traffic yet.**
+The pipeline above is implemented and tested end to end, but no honeypot node
+has run against the internet, so the behavioural clusters are unfitted and no
+session has passed through the second stage. Treat every number the API
+currently returns as structural, not empirical.
 
 **Isolation is verified, not enforced by this code.** The real controls are
 the container runtime's (`cap_drop: ALL`, `read_only`, `no-new-privileges`,
@@ -202,11 +203,13 @@ Bearer <access_token>`.
 | GET | `/api/v1/dashboard/live-events` | any | Recent sessions for the map |
 | GET | `/api/v1/sessions/` | any | List sessions (filter + paginate; `exclude_scanners` hides research scanners) |
 | GET | `/api/v1/sessions/{id}` | any | Session detail |
+| GET | `/api/v1/sessions/{id}/related` | any | Related sessions with shared evidence, time window and explicit result limits |
 | GET | `/api/v1/sessions/{id}/transcript` | any | Commands and what the honeypot appeared to reply |
 | GET | `/api/v1/sessions/{id}/credentials` | admin | Credentials tried — audit-logged on read |
 | POST | `/api/v1/sessions/{id}/export` | analyst | Export one session |
 | POST | `/api/v1/sessions/ingest` | analyst | Manual ingest |
 | POST | `/api/v1/sessions/ingest-internal` | token | Engine ingest |
+| GET | `/api/v1/sessions/ingest-capabilities` | token | Verify support for idempotent capture delivery |
 | GET | `/api/v1/alerts/` | any | List alerts |
 | GET | `/api/v1/alerts/stats` | any | Alert counts by status/severity |
 | PATCH | `/api/v1/alerts/{id}` | analyst | Triage an alert |
@@ -264,6 +267,4 @@ scripts/          GeoLite2 fetch
 
 ## License
 
-The upstream README states MIT; a standalone license file has not been included.
-Confirm licensing with the maintainers before redistributing the project.
-
+MIT — see [LICENSE](../LICENSE).

@@ -232,6 +232,39 @@ class TestIndicatorRoutes:
         )
         assert response.json()["indicators"] == []
 
+    async def test_search_treats_wildcards_as_literal_text(self, client, auth_headers):
+        """A `%` typed into the IOC search is a character, not a wildcard.
+
+        The escaping here replaced the two-character sequence `\\\\` instead of a
+        single backslash, and passed `ilike` a two-character escape where
+        SQLAlchemy wants one, so this search matched everything.
+        """
+        admin = await auth_headers(UserRole.ADMIN)
+        node_id = await _node(client, admin)
+        await _ingest(client, node_id)
+
+        response = await client.get("/api/v1/iocs/?search=%25", headers=admin)
+        assert response.status_code == 200, response.text
+        values = [row["value"] for row in response.json()["indicators"]]
+        assert values == [], f"a literal '%' matched {len(values)} rows as a wildcard"
+
+        # "_" is a single-character wildcard in LIKE, so unescaped it matches
+        # every value. Escaped, it matches only values that really contain one.
+        underscore = await client.get("/api/v1/iocs/?search=_", headers=admin)
+        matched = [row["value"] for row in underscore.json()["indicators"]]
+        assert matched, "expected the fixture's underscored tool name"
+        assert all("_" in value for value in matched), matched
+
+    async def test_search_still_matches_real_substrings(self, client, auth_headers):
+        admin = await auth_headers(UserRole.ADMIN)
+        node_id = await _node(client, admin)
+        await _ingest(client, node_id)
+
+        response = await client.get("/api/v1/iocs/?search=c2.example", headers=admin)
+        values = [row["value"] for row in response.json()["indicators"]]
+        assert "c2.example.net" in values
+
+
     async def test_unknown_type_is_400_not_an_empty_list(self, client, auth_headers):
         admin = await auth_headers(UserRole.ADMIN)
         response = await client.get("/api/v1/iocs/?ioc_type=nonsense", headers=admin)
