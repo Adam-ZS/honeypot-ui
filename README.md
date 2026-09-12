@@ -1,8 +1,8 @@
 <div align="center">
 
-![HoneySentinel — Investigation Workspace](docs/images/honeysentinel-banner.svg)
-
 # HoneySentinel AI
+
+![HoneySentinel — Investigation Workspace](docs/images/honeysentinel-banner.svg)
 
 ### Capture the interaction. Understand the behavior. Follow the evidence.
 
